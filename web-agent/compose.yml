@@ -1,0 +1,63 @@
+# docker compose for the web-facing agent demo
+# NOTE: This file includes an optional "insecure" service to demonstrate
+# common container hardening mistakes. Do NOT run the insecure service
+# outside of an isolated, disposable environment.
+
+version: "3.9"
+
+services:
+  web-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghostlock/web-agent:dev
+    container_name: web-agent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./public:/app/public
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # Insecure variant for educational demonstration only.
+  # Enable with profile: `docker compose --profile insecure up web-agent-insecure`
+  web-agent-insecure:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghostlock/web-agent:insecure
+    container_name: web-agent-insecure
+    restart: unless-stopped
+    profiles: ["insecure"]
+    ports:
+      - "18080:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    # Demonstrates risky mounts and privileges that can enable breakout.
+    # DO NOT USE IN PRODUCTION.
+    volumes:
+      - ./data:/app/data
+      - ./public:/app/public
+      - /var/run/docker.sock:/var/run/docker.sock           # Host Docker socket (dangerous)
+      - /:/host                                             # Full host filesystem mount (very dangerous)
+    privileged: true                                        # Grants extended privileges
+    cap_add:
+      - SYS_ADMIN                                           # Broad capabilities (dangerous)
+    security_opt:
+      - apparmor:unconfined                                 # Disables AppArmor confinement
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
