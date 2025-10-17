@@ -6,12 +6,12 @@
 version: "3.9"
 
 services:
-  web-agent:
+  container-agent:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghostlock/web-agent:dev
-    container_name: web-agent
+    image: ghostlock/container-agent:dev
+    container_name: container-agent
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -29,13 +29,13 @@ services:
       retries: 3
 
   # Insecure variant for educational demonstration only.
-  # Enable with profile: `docker compose --profile insecure up web-agent-insecure`
-  web-agent-insecure:
+  # Enable with profile: `docker compose --profile insecure up container-agent-insecure`
+  container-agent-insecure:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghostlock/web-agent:insecure
-    container_name: web-agent-insecure
+    image: ghostlock/container-agent:insecure
+    container_name: container-agent-insecure
     restart: unless-stopped
     profiles: ["insecure"]
     ports:
