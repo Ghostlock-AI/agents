@@ -1,0 +1,18 @@
+# Core dependencies
+python-dotenv==1.0.1
+
+# LLM providers
+openai==1.59.8
+
+# LangGraph for reasoning
+langgraph==0.2.69
+langchain-core==0.3.35
+langchain-openai==0.2.14
+
+# State management
+pydantic==2.10.5
+annotated-types>=0.6.0
+
+# Additional pydantic dependencies
+pydantic-core>=2.23.0
+typing-extensions>=4.12.0
