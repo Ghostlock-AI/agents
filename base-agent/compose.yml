@@ -1,0 +1,20 @@
+services:
+  base-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: base-agent
+    volumes:
+      # Mount entire project (super fast, no copying)
+      - .:/app
+      # Exclude data directory to keep it persistent only
+      - ./data:/app/data
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
