@@ -1,0 +1,3 @@
+smolagents
+python-dotenv
+ddgs

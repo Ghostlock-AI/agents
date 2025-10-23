@@ -44,7 +44,11 @@ python3 src/main.py
 
 ## Features
 
-- gpt4o-mini LLM
-- Tavily Search Tool
-- Shell Tool
-- reAct planning pattern
+LLM: gpt4o-mini only
+
+Tools:
+Tavily Internet Search
+Shell Tool
+
+Reasoning:
+reAct planning pattern

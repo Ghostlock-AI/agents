@@ -1,0 +1,12 @@
+[package]
+name = "tachi"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny YAML->Python agent generator for smolagents"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"]}
+serde = { version = "1", features = ["derive"]}
+serde_yaml_ng = "0.10"
+tera = "1"

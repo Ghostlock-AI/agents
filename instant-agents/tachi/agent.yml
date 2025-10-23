@@ -1,0 +1,4 @@
+agent:
+  name: 'weather-bot'
+  tools: ['search', 'webpage']
+  model: 'qwen-coder'
