@@ -5,10 +5,10 @@ Tool descriptions are CRITICAL - they tell the LLM when and how to use each tool
 LangChain/LangGraph uses these descriptions to bind tools to the model automatically.
 """
 
-import os
 import subprocess
-
-from langchain_community.tools.tavily_search import TavilySearchResults
+import requests
+from typing import Optional
+from ddgs import DDGS
 from langchain_core.tools import tool
 
 
@@ -17,31 +17,97 @@ def get_tools():
     Get all tools for the agent.
     Must be called after environment variables are loaded.
     """
-    return [get_tavily_search(), shell_exec]
+    return [ddgs_search, web_fetch, shell_exec]
 
 
-def get_tavily_search():
+@tool
+def ddgs_search(query: str, max_results: int = 5) -> str:
+    """Search the web using DuckDuckGo for current information, documentation, or answers to questions.
+
+    Use this when you need up-to-date information that isn't in your training data,
+    or when the user explicitly asks you to search for something.
+
+    Args:
+        query: The search query string
+        max_results: Maximum number of results to return (default: 5)
+
+    Returns:
+        Formatted search results with titles, snippets, and links
     """
-    Initialize Tavily search tool.
-    Called after dotenv loads environment variables.
+    try:
+        ddgs = DDGS()
+        results = ddgs.text(query, max_results=max_results)
+
+        if not results:
+            return "No results found for your search query."
+
+        # Format results nicely
+        formatted_results = []
+        for i, result in enumerate(results, 1):
+            formatted_results.append(
+                f"{i}. {result['title']}\n"
+                f"   URL: {result['href']}\n"
+                f"   {result['body']}"
+            )
+
+        return "\n\n".join(formatted_results)
+
+    except Exception as e:
+        return f"Error performing search: {str(e)}"
+
+
+@tool
+def web_fetch(url: str, timeout: int = 10) -> str:
+    """Fetch and extract the text content from a specific webpage.
+
+    Use this to retrieve the full content of a URL for detailed information.
+    Works best for text-based content (docs, articles, etc).
+
+    Args:
+        url: The URL to fetch
+        timeout: Request timeout in seconds (default: 10)
+
+    Returns:
+        The extracted text content from the webpage
     """
-    tavily = TavilySearchResults(
-        max_results=5,
-        search_depth="advanced",
-        include_answer=True,
-        include_raw_content=False,
-        api_key=os.getenv("TAVILY_API_KEY"),
-    )
+    try:
+        # Add scheme if missing
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
 
-    # Override description to be more specific for our use case
-    tavily.description = (
-        "Search the web for current information, documentation, or answers to questions. "
-        "Use this when you need up-to-date information that isn't in your training data, "
-        "or when the user explicitly asks you to search for something. "
-        "Input should be a search query string."
-    )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
 
-    return tavily
+        response = requests.get(url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+
+        # Simple text extraction - removes most HTML tags
+        content = response.text
+
+        # Basic HTML to text conversion
+        import re
+
+        # Remove script and style tags
+        content = re.sub(r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL)
+
+        # Remove HTML tags
+        content = re.sub(r"<[^>]+>", " ", content)
+
+        # Clean up whitespace
+        content = re.sub(r"\s+", " ", content)
+        content = content.strip()
+
+        if len(content) > 5000:
+            content = content[:5000] + "...\n[Content truncated]"
+
+        return content if content else "Could not extract readable content from the webpage."
+
+    except requests.RequestException as e:
+        return f"Error fetching URL: {str(e)}"
+    except Exception as e:
+        return f"Error processing webpage: {str(e)}"
 
 
 # Shell Execution Tool
