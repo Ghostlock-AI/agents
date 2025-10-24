@@ -7,12 +7,17 @@ Supports:
     - Rich markdown rendering
     - One-shot mode: python main.py "your question"
     - Session-based conversation tracking
+    - Runtime reasoning strategy switching
 
 Commands:
-    /file PATH        attach a local file to this message (with path completion)
-    /enter send       toggle to send-on-enter mode
-    /enter newline    toggle to newline-on-enter mode
-    /quit             exit the application
+    /file PATH                attach a local file to this message (with path completion)
+    /enter send               toggle to send-on-enter mode
+    /enter newline            toggle to newline-on-enter mode
+    /reasoning list           list all available reasoning strategies
+    /reasoning current        show current reasoning strategy
+    /reasoning switch NAME    switch to a different reasoning strategy
+    /reasoning info [NAME]    show detailed info about a strategy
+    /quit                     exit the application
 """
 
 from __future__ import annotations
@@ -157,11 +162,138 @@ def _build_message(prompt: str, attachments: List[Tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
+def handle_reasoning_command(agent, args: List[str]) -> bool:
+    """
+    Handle /reasoning commands.
+
+    Args:
+        agent: The agent instance
+        args: Command arguments (e.g., ['list'], ['switch', 'rewoo'])
+
+    Returns:
+        True if command was handled, False otherwise
+    """
+    if not args:
+        print("[client] Usage: /reasoning <list|current|switch|info>")
+        return True
+
+    subcommand = args[0].lower()
+
+    if subcommand == "list":
+        # List all available strategies
+        strategies = agent.list_strategies()
+
+        if HAS_RICH:
+            console.print("\n[bold cyan]Available Reasoning Strategies:[/bold cyan]\n")
+            for strategy in strategies:
+                current_marker = "[green]✓[/green] " if strategy["is_current"] else "  "
+                console.print(f"{current_marker}[bold]{strategy['name']}[/bold]")
+                console.print(f"  {strategy['description']}\n")
+        else:
+            print("\nAvailable Reasoning Strategies:\n")
+            for strategy in strategies:
+                current_marker = "✓ " if strategy["is_current"] else "  "
+                print(f"{current_marker}{strategy['name']}")
+                print(f"  {strategy['description']}\n")
+
+        return True
+
+    elif subcommand == "current":
+        # Show current strategy
+        current = agent.get_current_strategy_name()
+        info = agent.get_strategy_info()
+
+        if HAS_RICH:
+            console.print(f"\n[bold cyan]Current Strategy:[/bold cyan] [green]{current}[/green]")
+            console.print(f"[dim]{info['description']}[/dim]\n")
+        else:
+            print(f"\nCurrent Strategy: {current}")
+            print(f"{info['description']}\n")
+
+        return True
+
+    elif subcommand == "switch":
+        # Switch to a different strategy
+        if len(args) < 2:
+            print("[client] Usage: /reasoning switch <strategy_name>")
+            return True
+
+        new_strategy = args[1].lower()
+
+        try:
+            agent.switch_reasoning_strategy(new_strategy)
+
+            if HAS_RICH:
+                console.print(f"\n[green]✓[/green] Switched to [bold]{new_strategy}[/bold] strategy\n")
+            else:
+                print(f"\n✓ Switched to {new_strategy} strategy\n")
+
+        except KeyError as e:
+            if HAS_RICH:
+                console.print(f"\n[red]Error:[/red] {e}\n")
+            else:
+                print(f"\nError: {e}\n")
+
+        return True
+
+    elif subcommand == "info":
+        # Show detailed info about a strategy
+        strategy_name = args[1].lower() if len(args) > 1 else None
+
+        try:
+            info = agent.get_strategy_info(strategy_name)
+
+            if HAS_RICH:
+                console.print(f"\n[bold cyan]Strategy:[/bold cyan] [bold]{info['name']}[/bold]")
+                if info['is_current']:
+                    console.print("[green]✓ Currently active[/green]")
+                console.print(f"\n[bold]Description:[/bold]\n{info['description']}")
+                console.print(f"\n[bold]Streaming Support:[/bold] {'Yes' if info['supports_streaming'] else 'No'}")
+
+                if info['config']:
+                    console.print("\n[bold]Configuration:[/bold]")
+                    for key, value in info['config'].items():
+                        console.print(f"  {key}: {value}")
+
+                console.print()
+            else:
+                print(f"\nStrategy: {info['name']}")
+                if info['is_current']:
+                    print("✓ Currently active")
+                print(f"\nDescription:\n{info['description']}")
+                print(f"\nStreaming Support: {'Yes' if info['supports_streaming'] else 'No'}")
+
+                if info['config']:
+                    print("\nConfiguration:")
+                    for key, value in info['config'].items():
+                        print(f"  {key}: {value}")
+
+                print()
+
+        except KeyError as e:
+            if HAS_RICH:
+                console.print(f"\n[red]Error:[/red] {e}\n")
+            else:
+                print(f"\nError: {e}\n")
+
+        return True
+
+    else:
+        print(f"[client] Unknown reasoning subcommand: {subcommand}")
+        print("[client] Usage: /reasoning <list|current|switch|info>")
+        return True
+
+
 def stream_response(agent, prompt: str, session_id: str) -> None:
     """Stream response from agent and render with rich markdown."""
     accumulated = ""
 
-    status_msg = "[blue]Thinking..." if HAS_RICH else "Thinking..."
+    # Show current reasoning strategy
+    current_strategy = agent.get_current_strategy_name()
+    strategy_label = f"[{current_strategy.upper()}]"
+
+    status_msg = f"[blue]{strategy_label} Thinking..." if HAS_RICH else f"{strategy_label} Thinking..."
+
     if HAS_RICH:
         with console.status(status_msg, spinner="dots"):
             try:
@@ -218,6 +350,22 @@ def _run_tui(agent, session_id: str) -> None:
         completer = NestedCompleter.from_nested_dict({
             "/file": PathCompleter(expanduser=True),
             "/enter": {"send": None, "newline": None},
+            "/reasoning": {
+                "list": None,
+                "current": None,
+                "switch": {
+                    "react": None,
+                    "rewoo": None,
+                    "plan-execute": None,
+                    "lats": None,
+                },
+                "info": {
+                    "react": None,
+                    "rewoo": None,
+                    "plan-execute": None,
+                    "lats": None,
+                },
+            },
             "/quit": None,
         })
     except AttributeError:
@@ -225,11 +373,27 @@ def _run_tui(agent, session_id: str) -> None:
             completer = NestedCompleter({
                 "/file": PathCompleter(expanduser=True),
                 "/enter": {"send": None, "newline": None},
+                "/reasoning": {
+                    "list": None,
+                    "current": None,
+                    "switch": {
+                        "react": None,
+                        "rewoo": None,
+                        "plan-execute": None,
+                        "lats": None,
+                    },
+                    "info": {
+                        "react": None,
+                        "rewoo": None,
+                        "plan-execute": None,
+                        "lats": None,
+                    },
+                },
                 "/quit": None,
             })
         except Exception:
             from prompt_toolkit.completion import WordCompleter
-            completer = WordCompleter(["/file", "/enter", "/quit"])
+            completer = WordCompleter(["/file", "/enter", "/reasoning", "/quit"])
 
     # Style for the left bar
     style = Style.from_dict({
@@ -351,6 +515,12 @@ def _run_tui(agent, session_id: str) -> None:
                 print("[client] Usage: /enter send | /enter newline")
                 continue
 
+            # Handle /reasoning command
+            if ts.startswith("/reasoning"):
+                parts = ts.split()[1:]  # Get all parts after /reasoning
+                handle_reasoning_command(agent, parts)
+                continue
+
             # Draw separator before response
             width = shutil.get_terminal_size(fallback=(80, 20)).columns
             print("-" * max(20, min(120, width)))
@@ -375,7 +545,8 @@ def _run_tui(agent, session_id: str) -> None:
 def _run_simple_repl(agent, session_id: str) -> None:
     """Fallback simple REPL without prompt_toolkit."""
     print("\nBase Agent - Interactive Chat")
-    print("Type 'exit', 'quit', 'q' to quit. Commands: /file <path>, /quit")
+    print("Type 'exit', 'quit', 'q' to quit.")
+    print("Commands: /file <path>, /reasoning <list|current|switch|info>, /quit")
     print("-" * 60)
     print()
 
@@ -398,6 +569,12 @@ def _run_simple_repl(agent, session_id: str) -> None:
         # Handle /enter command
         if text.startswith("/enter"):
             print("[client] /enter not supported in simple mode")
+            continue
+
+        # Handle /reasoning command
+        if text.startswith("/reasoning"):
+            parts = text.split()[1:]  # Get all parts after /reasoning
+            handle_reasoning_command(agent, parts)
             continue
 
         # Parse file attachments
