@@ -14,6 +14,10 @@ langchain-community>=0.3.14
 ddgs>=4.0.0
 requests>=2.31.0
 
+# CLI/UI
+rich>=13.0.0
+prompt_toolkit>=3.0.0
+
 # State management
 pydantic==2.10.5
 annotated-types>=0.6.0
