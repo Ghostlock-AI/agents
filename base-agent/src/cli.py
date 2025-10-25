@@ -988,7 +988,7 @@ def _run_tui(agent, session_id: str) -> None:
             if HAS_RICH:
                 console.print()
                 console.print("[color(245)]/file — attach a local file[/color(245)]")
-                console.print("[color(245)]/context — manage file context (add/list/search)[/color(245)]")
+                console.print("[color(245)]/context — manage file context (add/list/search/remove/stats/clear)[/color(245)]")
                 console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
                 console.print("[color(245)]/help — show available commands[/color(245)]")
                 console.print("[color(245)]/quit — exit application[/color(245)]")
@@ -996,7 +996,7 @@ def _run_tui(agent, session_id: str) -> None:
             else:
                 print()
                 print("/file — attach a local file")
-                print("/context — manage file context (add/list/search)")
+                print("/context — manage file context (add/list/search/remove/stats/clear)")
                 print("/reasoning — list or switch strategy")
                 print("/help — show available commands")
                 print("/quit — exit application")
@@ -1328,13 +1328,13 @@ def _run_simple_repl(agent, session_id: str) -> None:
             print()
             if HAS_RICH:
                 console.print("[color(245)]/file — attach a local file[/color(245)]")
-                console.print("[color(245)]/context — manage file context (add/list/search)[/color(245)]")
+                console.print("[color(245)]/context — manage file context (add/list/search/remove/stats/clear)[/color(245)]")
                 console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
                 console.print("[color(245)]/help — show available commands[/color(245)]")
                 console.print("[color(245)]/quit — exit application[/color(245)]")
             else:
                 print("/file — attach a local file")
-                print("/context — manage file context (add/list/search)")
+                print("/context — manage file context (add/list/search/remove/stats/clear)")
                 print("/reasoning — list or switch strategy")
                 print("/help — show available commands")
                 print("/quit — exit application")
