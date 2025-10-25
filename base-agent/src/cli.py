@@ -31,6 +31,7 @@ from pathlib import Path
 import threading
 import re
 import glob
+import math
 
 try:
     from rich.console import Console
@@ -391,14 +392,22 @@ def display_startup_banner(agent, animate: bool = True, duration: float = 3.0) -
     current_strategy = agent.get_current_strategy_name()
     strategy_info = agent.get_strategy_info(current_strategy)
 
-    # Format the text content
-    text_content = f"""[magenta]agent:[/] Base Agent
-[magenta]model:[/] {model_name}
-[magenta]planning:[/] {current_strategy.upper()} - {strategy_info['description'].split('.')[0]}
-[magenta]tools:[/]
-  - internet search (DuckDuckGo)
-  - web fetch (HTTP/HTTPS)
-  - command line (shell)"""
+    # Format the text content with low-contrast keywords and default-color values
+    # Use light grey for low-contrast parts (works on dark and light themes)
+    kstyle = "color(245)"  # light grey
+    cwd = os.getcwd()
+    planning_line = f"{current_strategy.upper()} - {strategy_info['description'].split('.')[0]}"
+
+    text_content = (
+        f"[{kstyle}]agent:[/] Base Agent\n"
+        f"[{kstyle}]model:[/] {model_name}\n"
+        f"[{kstyle}]planning:[/] {planning_line}\n"
+        f"[{kstyle}]tools:[/]\n"
+        f"  - internet search (DuckDuckGo)\n"
+        f"  - web fetch (HTTP/HTTPS)\n"
+        f"  - command line (shell)\n"
+        f"[{kstyle}]directory:[/] {cwd}"
+    )
 
     if HAS_RICH:
         # Text-only panel, auto-widen to fit content and planning line
@@ -417,7 +426,7 @@ def display_startup_banner(agent, animate: bool = True, duration: float = 3.0) -
         cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else default_cap
         width_target = min(max(desired, min_w), cap)
 
-        panel = Panel(text_content, border_style="blue", width=width_target)
+        panel = Panel(text_content, border_style="color(240)", width=width_target)
         console.print()
         console.print(panel)
         return
@@ -430,7 +439,7 @@ def _display_static_banner(text_content: str) -> None:
     """Display static banner without animation."""
     if HAS_RICH:
         width_cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else 60
-        panel = Panel(text_content, border_style="blue", width=width_cap)
+        panel = Panel(text_content, border_style="color(240)", width=width_cap)
         console.print()
         console.print(panel)
     else:
@@ -837,6 +846,36 @@ def _run_tui(agent, session_id: str) -> None:
 
     _enable_modified_keys()
 
+    def _recolor_last_prompt_submission(submitted: str) -> None:
+        """Best-effort recolor of the just-submitted prompt in-place to low-contrast.
+
+        We approximate the number of terminal rows consumed (accounting for simple wrapping)
+        and move the cursor up to rewrite those lines in grey. This avoids echoing a duplicate.
+        """
+        try:
+            if not HAS_RICH:
+                return
+            if not submitted:
+                return
+            prefix = "▌ "
+            width = max(10, shutil.get_terminal_size(fallback=(80, 20)).columns)
+            logical_lines = submitted.splitlines() or [""]
+            # Estimate how many terminal rows the submission used
+            rows = 0
+            for ln in logical_lines:
+                length = len(prefix) + len(ln)
+                rows += max(1, math.ceil(length / width))
+            # Move cursor up and rewrite
+            sys.stdout.write(f"\x1b[{rows}A")
+            for ln in logical_lines:
+                sys.stdout.write("\x1b[2K\r")  # clear line
+                console.print(f"[color(245)]{prefix}{ln}[/color(245)]", end="")
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+        except Exception:
+            # If anything goes wrong, quietly skip recolor
+            pass
+
     # Key bindings
     kb = KeyBindings()
 
@@ -933,6 +972,9 @@ def _run_tui(agent, session_id: str) -> None:
                 parts = ts.split()[1:]  # Get all parts after /reasoning
                 handle_reasoning_command(agent, parts)
                 continue
+
+            # Recolor the just-submitted text in-place to low-contrast
+            _recolor_last_prompt_submission(text)
 
             # Draw separator before response
             width = shutil.get_terminal_size(fallback=(80, 20)).columns
