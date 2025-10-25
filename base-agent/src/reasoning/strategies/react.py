@@ -15,8 +15,8 @@ Best for:
 Performance: Fast, reliable, industry standard
 """
 
-from typing import Literal
-from langchain_core.messages import AIMessage
+from typing import Literal, List
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
@@ -92,12 +92,50 @@ class ReActStrategy(ReasoningStrategy):
 
             return {"messages": [response]}
 
+        def _extract_urls_from_ddgs(content: str, max_urls: int = 2) -> List[str]:
+            import re
+            urls = re.findall(r"URL:\s*(\S+)", content)
+            # Deduplicate and keep first N
+            seen = set()
+            out: List[str] = []
+            for u in urls:
+                if u not in seen:
+                    out.append(u)
+                    seen.add(u)
+                if len(out) >= max_urls:
+                    break
+            return out
+
+        def follow_links_node(state):
+            """If the last tool output was a ddgs_search, fetch top URLs automatically."""
+            messages = state["messages"]
+            # Find the last ddgs_search tool result
+            last_tool: ToolMessage | None = None
+            for msg in reversed(messages):
+                if isinstance(msg, ToolMessage) and hasattr(msg, "name") and msg.name == "ddgs_search":
+                    last_tool = msg
+                    break
+            if not last_tool:
+                return {"messages": []}
+
+            urls = _extract_urls_from_ddgs(str(last_tool.content), max_urls=2)
+            if not urls:
+                return {"messages": []}
+
+            # Build explicit web_fetch tool calls for the top URLs
+            tool_calls = [
+                {"name": "web_fetch", "args": {"url": u}, "id": f"fl{i}"}
+                for i, u in enumerate(urls, start=1)
+            ]
+            return {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
+
         # Create the graph
         workflow = StateGraph(agent_state_class)
 
         # Add nodes
         workflow.add_node("agent", agent_node)
         workflow.add_node("tools", ToolNode(tools))
+        workflow.add_node("follow_links", follow_links_node)
 
         # Define the flow
         workflow.add_edge(START, "agent")
@@ -112,8 +150,56 @@ class ReActStrategy(ReasoningStrategy):
             }
         )
 
-        # After tools execute, always go back to agent
-        workflow.add_edge("tools", "agent")
+        # After tools execute, decide whether to auto-follow search links
+        def after_tools_route(state) -> Literal["follow_links", "agent"]:
+            messages = state["messages"]
+            # Find the last tool name
+            last_tool_name = None
+            for msg in reversed(messages):
+                if isinstance(msg, ToolMessage):
+                    last_tool_name = getattr(msg, "name", None)
+                    break
+            if last_tool_name == "ddgs_search":
+                # Check if a web_fetch happened after this ddgs_search already
+                # Find index of that tool message
+                idx = None
+                for i in range(len(messages) - 1, -1, -1):
+                    m = messages[i]
+                    if isinstance(m, ToolMessage) and getattr(m, "name", None) == "ddgs_search":
+                        idx = i
+                        break
+                if idx is not None:
+                    for m in messages[idx + 1:]:
+                        if isinstance(m, ToolMessage) and getattr(m, "name", None) == "web_fetch":
+                            return "agent"
+                return "follow_links"
+            return "agent"
+
+        workflow.add_conditional_edges(
+            "tools",
+            after_tools_route,
+            {
+                "follow_links": "follow_links",
+                "agent": "agent",
+            },
+        )
+
+        # After follow_links, if it emitted tool_calls -> tools; else -> agent
+        def after_follow_links_route(state) -> Literal["tools", "agent"]:
+            messages = state["messages"]
+            last = messages[-1]
+            if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+                return "tools"
+            return "agent"
+
+        workflow.add_conditional_edges(
+            "follow_links",
+            after_follow_links_route,
+            {
+                "tools": "tools",
+                "agent": "agent",
+            },
+        )
 
         # Add memory for conversation history
         memory = MemorySaver()

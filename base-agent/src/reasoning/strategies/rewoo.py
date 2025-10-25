@@ -24,8 +24,8 @@ Best for:
 Research: https://arxiv.org/abs/2305.18323
 """
 
-from typing import List, Dict, Any, Literal
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from typing import List, Dict, Any, Literal, Optional, Set
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
@@ -33,6 +33,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
 from .base import ReasoningStrategy
+from reasoning.tool_context import build_tool_guide
 
 
 class Plan(BaseModel):
@@ -61,154 +62,216 @@ class ReWOOStrategy(ReasoningStrategy):
         )
 
     def create_graph(self, agent_state_class, llm_with_tools, tools):
-        """Create the ReWOO reasoning graph."""
+        """Create the ReWOO reasoning graph with explicit execution of planned steps."""
 
-        # Create a planning prompt
+        # Create a planning prompt that demands strict JSON with exact tool names
         planning_prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a strategic planner. Given a user query, create a detailed plan of steps to solve it.
+            (
+                "system",
+                """You are a strategic planner. Given a user query, return a STRICT JSON plan with steps.
 
-For each step, specify:
-1. The tool to use
-2. The arguments for that tool
-3. Which previous steps this depends on (empty list if independent)
+TOOL CONTEXT (catalog, rules, examples):
+{tool_guide}
 
-Available tools: {tools}
+JSON schema (example):
+{{
+  "steps": [
+    {{"id": 1, "tool": "ddgs_search", "args": {{"query": "...", "max_results": 5}}, "depends_on": []}},
+    {{"id": 2, "tool": "web_fetch",   "args": {{"url": "..."}},            "depends_on": [1]}}
+  ]
+}}
 
-Return your plan as a structured list of steps. Think carefully about which steps can run in parallel (no dependencies) vs which must run sequentially.
-
-Example plan format:
-Step 1: {{tool: "search", args: {{query: "Python asyncio"}}, depends_on: []}}
-Step 2: {{tool: "search", args: {{query: "Python threading"}}, depends_on: []}}  # Can run parallel with Step 1
-Step 3: {{tool: "web_fetch", args: {{url: "result from step 1"}}, depends_on: [1]}}  # Must wait for Step 1
-"""),
+Rules:
+- Use integers for step ids starting at 1.
+- Use depends_on to express dependencies by id.
+- Ensure arguments match the tool signatures.
+- Do NOT include any text outside JSON.
+""",
+            ),
             ("human", "{query}")
         ])
 
+        def _tools_signature() -> str:
+            sigs = []
+            for t in tools:
+                name = getattr(t, "name", "")
+                doc = getattr(t, "description", "")
+                sigs.append(f"- {name}: {doc}")
+            return "\n".join(sigs)
+
+        def _parse_json(text: str) -> Optional[Dict[str, Any]]:
+            import json, re
+            s = text.strip()
+            m = re.search(r"\{[\s\S]*\}$", s)
+            if m:
+                s = m.group(0)
+            try:
+                return json.loads(s)
+            except Exception:
+                return None
+
         def planner_node(state):
-            """Create a plan for solving the task."""
+            """Create a plan for solving the task and store it in state['plan']."""
             messages = state["messages"]
-            last_message = messages[-1]
-
-            # Get the user query
-            if isinstance(last_message, HumanMessage):
-                query = last_message.content
-            else:
-                # Find the last human message
-                for msg in reversed(messages):
-                    if isinstance(msg, HumanMessage):
-                        query = msg.content
-                        break
-                else:
-                    query = str(last_message.content)
-
-            # Create plan prompt
-            tool_descriptions = "\n".join([
-                f"- {tool.name}: {tool.description}"
-                for tool in tools
-            ])
+            query = None
+            for msg in reversed(messages):
+                if isinstance(msg, HumanMessage):
+                    query = msg.content
+                    break
+            if not query:
+                query = str(messages[-1].content)
 
             prompt = planning_prompt.format_messages(
-                tools=tool_descriptions,
-                query=query
+                tool_guide=build_tool_guide(tools),
+                query=query,
             )
-
-            # Get plan from LLM
             response = llm_with_tools.invoke(prompt)
+            text = response.content if isinstance(response.content, str) else str(response.content)
+            plan_json = _parse_json(text)
+            if not plan_json or not isinstance(plan_json, dict) or "steps" not in plan_json:
+                plan_json = {"steps": [
+                    {"id": 1, "tool": "ddgs_search", "args": {"query": query, "max_results": 5}, "depends_on": []}
+                ]}
+            return {
+                "messages": [AIMessage(content=f"[PLAN CREATED]\n\n{text}")],
+                "plan": plan_json,
+                "executed": [],
+                "results": [],
+            }
 
-            # Store the plan in state
-            # The plan will be in the AI response
-            return {"messages": [response]}
+        def plan_to_calls_node(state):
+            """Expand ready plan steps into explicit tool calls (can be parallel)."""
+            plan = state.get("plan") or {}
+            steps: List[Dict[str, Any]] = plan.get("steps", [])
+            executed: Set[str] = set(state.get("executed") or [])
 
-        def executor_node(state):
-            """Execute the planned steps (in parallel where possible)."""
-            messages = state["messages"]
-            last_message = messages[-1]
+            def is_ready(s: Dict[str, Any]) -> bool:
+                sid = str(s.get("id"))
+                if sid in executed:
+                    return False
+                deps = s.get("depends_on", []) or []
+                return all(str(d) in executed for d in deps)
 
-            # Check if this is a plan or if we need to execute tools
-            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                # This is handled by ToolNode automatically
+            ready = [s for s in steps if is_ready(s)]
+            tool_calls = []
+            for s in ready:
+                tool_name = s.get("tool")
+                args = s.get("args") or {}
+                sid = str(s.get("id"))
+                if tool_name:
+                    tool_calls.append({"name": tool_name, "args": args, "id": f"s{sid}"})
+
+            if not tool_calls:
                 return {"messages": []}
+            return {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
 
-            # If no tool calls, we're done planning - ask agent to execute
-            # by moving to tools node
-            return {"messages": [last_message]}
+        def collect_results_node(state):
+            """Collect tool results and mark corresponding steps as executed."""
+            messages = state["messages"]
+            executed: Set[str] = set(state.get("executed") or [])
+            results: List[Dict[str, Any]] = list(state.get("results") or [])
+
+            for msg in messages:
+                if isinstance(msg, ToolMessage):
+                    tcid = getattr(msg, "tool_call_id", None)
+                    name = getattr(msg, "name", None)
+                    if tcid and tcid.startswith("s"):
+                        sid = tcid[1:]
+                        # Only record once per step id
+                        if sid not in executed:
+                            executed.add(sid)
+                            results.append({
+                                "step_id": sid,
+                                "tool": name,
+                                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                            })
+
+            return {"executed": list(executed), "results": results}
 
         def synthesizer_node(state):
-            """Synthesize final answer from all execution results."""
+            """Synthesize final answer from collected execution results."""
             messages = state["messages"]
-
-            # Find all tool results
-            tool_results = []
-            for msg in messages:
-                if hasattr(msg, "type") and msg.type == "tool":
-                    tool_results.append(msg.content)
-
-            # Create synthesis prompt
-            synthesis_prompt = f"""Based on the following tool execution results, provide a comprehensive answer to the original query:
-
-Tool Results:
-{chr(10).join([f"- {result}" for result in tool_results])}
-
-Provide a clear, well-structured answer that synthesizes these results."""
-
-            # Get final response
-            response = llm_with_tools.invoke(
-                messages + [SystemMessage(content=synthesis_prompt)]
+            results: List[Dict[str, Any]] = list(state.get("results") or [])
+            lines = []
+            for r in results:
+                lines.append(f"- [{r.get('tool')}] step {r.get('step_id')}: {r.get('content')}")
+            synthesis_prompt = (
+                "Based on the following tool execution results, provide a concise, complete answer to the original query.\n\n"
+                + "\n".join(lines)
             )
-
+            response = llm_with_tools.invoke(messages + [SystemMessage(content=synthesis_prompt)])
             return {"messages": [response]}
 
-        def should_continue(state) -> Literal["tools", "synthesize", "end"]:
-            """Route based on current state."""
-            messages = state["messages"]
-            last_message = messages[-1]
+        def planner_route(state) -> Literal["plan_to_calls", "synthesizer"]:
+            plan = state.get("plan") or {}
+            steps = plan.get("steps", [])
+            return "plan_to_calls" if steps else "synthesizer"
 
-            # If we have tool calls, execute them
-            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                return "tools"
+        def after_plan_route(state) -> Literal["tools", "synthesizer"]:
+            plan = state.get("plan") or {}
+            steps: List[Dict[str, Any]] = plan.get("steps", [])
+            executed: Set[str] = set(state.get("executed") or [])
+            for s in steps:
+                sid = str(s.get("id"))
+                if sid in executed:
+                    continue
+                deps = s.get("depends_on", []) or []
+                if all(str(d) in executed for d in deps):
+                    return "tools"
+            return "synthesizer"
 
-            # Check if we have tool results to synthesize
-            has_tool_results = any(
-                hasattr(msg, "type") and msg.type == "tool"
-                for msg in messages
-            )
-
-            if has_tool_results:
-                # Check if we've already synthesized
-                # Look for a final AI message after tool results
-                for i in range(len(messages) - 1, -1, -1):
-                    if hasattr(messages[i], "type") and messages[i].type == "tool":
-                        # Found last tool message, check if there's an AI message after
-                        if i < len(messages) - 1 and isinstance(messages[-1], AIMessage):
-                            return "end"
-                        return "synthesize"
-
-            return "end"
+        def after_tools_route(state) -> Literal["plan_to_calls", "synthesizer"]:
+            plan = state.get("plan") or {}
+            steps: List[Dict[str, Any]] = plan.get("steps", [])
+            executed: Set[str] = set(state.get("executed") or [])
+            for s in steps:
+                if str(s.get("id")) not in executed:
+                    return "plan_to_calls"
+            return "synthesizer"
 
         # Create the graph
         workflow = StateGraph(agent_state_class)
 
         # Add nodes
         workflow.add_node("planner", planner_node)
+        workflow.add_node("plan_to_calls", plan_to_calls_node)
         workflow.add_node("tools", ToolNode(tools))
+        workflow.add_node("collect", collect_results_node)
         workflow.add_node("synthesizer", synthesizer_node)
 
         # Define the flow
         workflow.add_edge(START, "planner")
 
-        # After planning, decide what to do
+        # After planning, expand to calls or synthesize
         workflow.add_conditional_edges(
             "planner",
-            should_continue,
+            planner_route,
             {
-                "tools": "tools",
-                "synthesize": "synthesizer",
-                "end": END,
+                "plan_to_calls": "plan_to_calls",
+                "synthesizer": "synthesizer",
             }
         )
 
-        # After tools, synthesize
-        workflow.add_edge("tools", "synthesizer")
+        # After expansion, either run tools or synthesize
+        workflow.add_conditional_edges(
+            "plan_to_calls",
+            after_plan_route,
+            {
+                "tools": "tools",
+                "synthesizer": "synthesizer",
+            }
+        )
+
+        # After tools, collect then loop/finish
+        workflow.add_edge("tools", "collect")
+        workflow.add_conditional_edges(
+            "collect",
+            after_tools_route,
+            {
+                "plan_to_calls": "plan_to_calls",
+                "synthesizer": "synthesizer",
+            }
+        )
 
         # After synthesis, end
         workflow.add_edge("synthesizer", END)

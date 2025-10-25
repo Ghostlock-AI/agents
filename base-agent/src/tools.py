@@ -21,7 +21,7 @@ def get_tools():
 
 
 @tool
-def ddgs_search(query: str, max_results: int = 5) -> str:
+def ddgs_search(query: str, max_results: int = 5, return_json: bool = False) -> str:
     """Search the web using DuckDuckGo for current information, documentation, or answers to questions.
 
     Use this when you need up-to-date information that isn't in your training data,
@@ -30,6 +30,7 @@ def ddgs_search(query: str, max_results: int = 5) -> str:
     Args:
         query: The search query string
         max_results: Maximum number of results to return (default: 5)
+        return_json: If True, return a compact JSON array of {title, url, snippet}.
 
     Returns:
         Formatted search results with titles, snippets, and links
@@ -41,7 +42,16 @@ def ddgs_search(query: str, max_results: int = 5) -> str:
         if not results:
             return "No results found for your search query."
 
-        # Format results nicely
+        # Optionally return JSON for deterministic post-processing
+        if return_json:
+            import json as _json
+            items = [
+                {"title": r.get("title"), "url": r.get("href"), "snippet": r.get("body")}
+                for r in results
+            ]
+            return _json.dumps(items, ensure_ascii=False)
+
+        # Text format with easy-to-parse URL lines
         formatted_results = []
         for i, result in enumerate(results, 1):
             formatted_results.append(

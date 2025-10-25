@@ -3,7 +3,7 @@ Agent - Core agent class with reasoning loop and memory.
 """
 
 import os
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Optional, Dict, Any, List
 from pathlib import Path
 
 from langchain_openai import ChatOpenAI
@@ -11,12 +11,18 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langgraph.graph.message import add_messages
 
 from tools import get_tools
+from reasoning.tool_context import build_tool_guide
 from reasoning import get_global_registry, create_react_graph
 
 
 class AgentState(TypedDict):
-    """State that tracks conversation messages."""
+    """State that tracks conversation messages and optional planning state."""
     messages: Annotated[list[BaseMessage], add_messages]
+    # Optional planning state used by some strategies (ReWOO / Plan-Execute)
+    plan: Optional[Dict[str, Any]]  # Strategy-specific plan structure
+    step_idx: Optional[int]         # Current step index for sequential execution
+    executed: Optional[List[str]]   # Executed step ids (as strings)
+    results: Optional[List[Dict[str, Any]]]  # Collected tool results / summaries
 
 
 class Agent:
@@ -124,7 +130,9 @@ class Agent:
         input_state = {
             "messages": [
                 SystemMessage(content=self.system_prompt),
-                HumanMessage(content=user_input)
+                # Inject shared tool guide so all strategies see the same context
+                SystemMessage(content=build_tool_guide(self.tools)),
+                HumanMessage(content=user_input),
             ]
         }
 

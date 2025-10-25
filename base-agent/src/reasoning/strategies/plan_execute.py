@@ -27,8 +27,8 @@ Best for:
 Research: Based on LangChain's PlanAndExecute pattern
 """
 
-from typing import List, Literal, Union
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
+from typing import List, Literal, Union, Optional
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
@@ -36,6 +36,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
 from .base import ReasoningStrategy
+from reasoning.tool_context import build_tool_guide
 
 
 class Step(BaseModel):
@@ -88,208 +89,217 @@ class PlanExecuteStrategy(ReasoningStrategy):
             self.max_replans = kwargs["max_replans"]
 
     def create_graph(self, agent_state_class, llm_with_tools, tools):
-        """Create the Plan-and-Execute reasoning graph."""
+        """Create the Plan-and-Execute reasoning graph with enforced step execution."""
 
-        # Prompt for creating initial plan
-        planning_prompt = """You are a strategic planner. Break down this task into clear, actionable steps.
+        # Prompt for creating initial plan (strict JSON with tool + args per step)
+        planning_prompt = """You are a strategic planner. Return STRICT JSON for a step-by-step plan.
 
-Task: {task}
+TOOL CONTEXT (catalog, rules, examples):
+{tool_guide}
 
-Create a step-by-step plan. Each step should be:
-1. Specific and actionable
-2. Achievable with available tools
-3. Build on previous steps
+JSON schema (example):
+{{
+  "steps": [
+    {{"id": 1, "description": "Search for X", "tool": "ddgs_search", "args": {{"query": "X", "max_results": 5}}}},
+    {{"id": 2, "description": "Fetch details", "tool": "web_fetch", "args": {{"url": "..."}}}}
+  ]
+}}
 
-Available tools:
-{tools}
+Rules:
+- Use integers for id starting at 1.
+- Each step must specify a tool and args matching the tool signature.
+- Do NOT include any text outside JSON.
+"""
 
-Provide a numbered list of steps (3-7 steps recommended)."""
+        # No free-form execution prompt; we will emit explicit tool calls for each step.
 
-        # Prompt for execution
-        execution_prompt = """You are executing step {step_num} of a plan.
+        # Replanning omitted in this simplified, deterministic executor.
 
-Current Step: {step_description}
+        def _tools_signature() -> str:
+            sigs = []
+            for t in tools:
+                name = getattr(t, "name", "")
+                doc = getattr(t, "description", "")
+                sigs.append(f"- {name}: {doc}")
+            return "\n".join(sigs)
 
-Previous Steps Completed:
-{previous_results}
-
-Execute this step using available tools as needed. Be thorough and precise."""
-
-        # Prompt for checking if replanning is needed
-        replan_check_prompt = """You are reviewing progress on a multi-step plan.
-
-Original Goal: {goal}
-
-Steps Completed:
-{completed_steps}
-
-Current Situation:
-{current_result}
-
-Remaining Steps:
-{remaining_steps}
-
-Do we need to replan? Answer with:
-- CONTINUE: If we can proceed with the existing plan
-- REPLAN: If we need to adjust the plan based on new information
-- DONE: If the goal is already achieved
-
-Then explain your reasoning."""
+        def _parse_json(text: str) -> Optional[dict]:
+            import json, re
+            s = text.strip()
+            m = re.search(r"\{[\s\S]*\}$", s)
+            if m:
+                s = m.group(0)
+            try:
+                return json.loads(s)
+            except Exception:
+                return None
 
         def planner_node(state):
-            """Create initial plan."""
+            """Create initial plan (structured) and initialize step index."""
             messages = state["messages"]
-
-            # Get the user's task
             task = None
             for msg in reversed(messages):
                 if isinstance(msg, HumanMessage):
                     task = msg.content
                     break
-
             if not task:
                 task = str(messages[-1].content)
 
-            # Format tool descriptions
-            tool_descriptions = "\n".join([
-                f"- {tool.name}: {tool.description}"
-                for tool in tools
-            ])
-
-            # Create planning prompt
-            prompt_text = planning_prompt.format(
-                task=task,
-                tools=tool_descriptions
-            )
-
-            # Get plan from LLM
+            prompt_text = planning_prompt.format(tool_guide=build_tool_guide(tools))
             planning_messages = [
                 SystemMessage(content=prompt_text),
-                HumanMessage(content=f"Create a plan for: {task}")
+                HumanMessage(content=f"Task: {task}")
             ]
-
             response = llm_with_tools.invoke(planning_messages)
+            text = response.content if isinstance(response.content, str) else str(response.content)
+            plan_json = _parse_json(text) or {"steps": [
+                {"id": 1, "description": f"Search: {task}", "tool": "ddgs_search", "args": {"query": task, "max_results": 5}}
+            ]}
+            self._current_plan = plan_json
+            return {
+                "messages": [AIMessage(content=f"[PLAN CREATED]\n\n{text}")],
+                "plan": plan_json,
+                "step_idx": 0,
+                "results": [],
+            }
 
-            # Store the plan (parse from response)
-            # For simplicity, we'll just store the plan text
-            self._current_plan = response.content
+        def step_to_calls_node(state):
+            """Emit explicit tool call for the current step (sequential)."""
+            plan = state.get("plan") or {"steps": []}
+            steps: List[dict] = plan.get("steps", [])
+            idx = int(state.get("step_idx") or 0)
+            if idx >= len(steps):
+                return {"messages": []}
+            step = steps[idx]
+            tool = step.get("tool")
+            args = dict(step.get("args") or {})
+            sid = step.get("id", idx + 1)
+            # Heuristic: if web_fetch URL is not absolute, try to take top URL from the last ddgs_search tool output
+            if tool == "web_fetch":
+                url = str(args.get("url", ""))
+                if not url.startswith(("http://", "https://")):
+                    last_search: Optional[ToolMessage] = None
+                    for m in reversed(state["messages"]):
+                        if isinstance(m, ToolMessage) and getattr(m, "name", None) == "ddgs_search":
+                            last_search = m
+                            break
+                    if last_search is not None:
+                        import re
+                        urls = re.findall(r"URL:\s*(\S+)", str(last_search.content))
+                        if urls:
+                            args["url"] = urls[0]
+            if not tool:
+                return {"messages": []}
+            return {"messages": [AIMessage(content="", tool_calls=[{"name": tool, "args": args, "id": f"pe{sid}"}]) ]}
 
-            # Add a message indicating we've created a plan
-            plan_message = AIMessage(
-                content=f"[PLAN CREATED]\n\n{response.content}"
-            )
+        # Replan checker removed in this simplified deterministic loop
 
-            return {"messages": [plan_message]}
+        def after_planner_route(state) -> Literal["execute", "end"]:
+            plan = state.get("plan") or {}
+            steps = plan.get("steps", [])
+            return "execute" if steps else "end"
 
-        def executor_node(state):
-            """Execute the current step."""
+        def after_execute_route(state) -> Literal["tools", "end"]:
+            # If we emitted a tool call, go to tools; else end
             messages = state["messages"]
-
-            # Find the plan and determine current step
-            # This is simplified - in production, you'd parse the plan more carefully
-            execution_message = SystemMessage(
-                content="Execute the next step of the plan using available tools."
-            )
-
-            # Invoke LLM with tools to execute
-            response = llm_with_tools.invoke(messages + [execution_message])
-
-            return {"messages": [response]}
-
-        def replan_checker_node(state):
-            """Check if we need to replan."""
-            messages = state["messages"]
-
-            # Create replan check prompt
-            check_prompt = """Review the progress and determine if we should:
-            1. CONTINUE with the current plan
-            2. REPLAN with adjusted steps
-            3. DONE (goal achieved)
-
-            Respond with just the decision word first, then explanation."""
-
-            check_message = SystemMessage(content=check_prompt)
-            response = llm_with_tools.invoke(messages + [check_message])
-
-            return {"messages": [response]}
-
-        def should_continue(state) -> Literal["execute", "tools", "replan_check", "end"]:
-            """Determine next action based on state."""
-            messages = state["messages"]
-            last_message = messages[-1]
-
-            # If there are tool calls, go to tools
-            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            last = messages[-1]
+            if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
                 return "tools"
+            return "end"
 
-            # Check if we just created a plan
-            if isinstance(last_message, AIMessage) and "[PLAN CREATED]" in last_message.content:
-                return "execute"
+        def consolidate_node(state):
+            """Collect last tool outputs for the current step and advance index."""
+            idx = int(state.get("step_idx") or 0)
+            plan = state.get("plan") or {"steps": []}
+            steps: List[dict] = plan.get("steps", [])
+            if idx >= len(steps):
+                return {}
+            sid = steps[idx].get("id", idx + 1)
+            # Gather tool messages with matching id prefix
+            contents: List[str] = []
+            for msg in state["messages"]:
+                if isinstance(msg, ToolMessage):
+                    tcid = getattr(msg, "tool_call_id", "")
+                    if tcid == f"pe{sid}":
+                        contents.append(msg.content if isinstance(msg.content, str) else str(msg.content))
+            # Update results list
+            results = list(state.get("results") or [])
+            results.append({"step_id": sid, "output": "\n".join(contents)})
+            return {"results": results, "step_idx": idx + 1}
 
-            # Check if we need to verify plan status
-            # Look for execution results
-            content = str(last_message.content).upper()
+        def synthesizer_node(state):
+            """Synthesize a final answer from the collected step results."""
+            messages = state["messages"]
+            plan = state.get("plan") or {"steps": []}
+            steps: List[dict] = plan.get("steps", [])
+            results = list(state.get("results") or [])
 
-            if "DONE" in content or "GOAL ACHIEVED" in content:
-                return "end"
-
-            if "REPLAN" in content and self._replan_count < self.max_replans:
-                self._replan_count += 1
-                return "replan_check"
-
-            # Check if we have recent tool use - if so, check plan status
-            recent_tool_use = any(
-                hasattr(msg, "type") and msg.type == "tool"
-                for msg in messages[-3:]
+            # Build a compact summary for the LLM to synthesize from
+            lines = []
+            for s in steps:
+                sid = s.get("id")
+                desc = s.get("description", "")
+                out = next((r.get("output") for r in results if r.get("step_id") == sid), "")
+                lines.append(f"Step {sid}: {desc}\nResult: {out}")
+            synthesis_prompt = (
+                "Based on the following executed plan steps and their results, provide a complete answer to the user's task.\n\n"
+                + "\n\n".join(lines)
             )
-
-            if recent_tool_use:
-                return "replan_check"
-
-            # Default: continue executing
-            return "execute"
+            response = llm_with_tools.invoke(messages + [SystemMessage(content=synthesis_prompt)])
+            return {"messages": [response]}
 
         # Create the graph
         workflow = StateGraph(agent_state_class)
 
         # Add nodes
         workflow.add_node("planner", planner_node)
-        workflow.add_node("executor", executor_node)
+        workflow.add_node("executor", step_to_calls_node)
         workflow.add_node("tools", ToolNode(tools))
-        workflow.add_node("replan_checker", replan_checker_node)
+        workflow.add_node("consolidate", consolidate_node)
+        workflow.add_node("synthesizer", synthesizer_node)
 
         # Define the flow
         workflow.add_edge(START, "planner")
 
-        # After planning, start executing
-        workflow.add_edge("planner", "executor")
+        # After planning, start executing if there are steps
+        workflow.add_conditional_edges(
+            "planner",
+            after_planner_route,
+            {
+                "execute": "executor",
+                "end": END,
+            }
+        )
 
-        # After execution, decide next action
+        # After emitting tool call, go to tools
         workflow.add_conditional_edges(
             "executor",
-            should_continue,
+            after_execute_route,
             {
-                "execute": "executor",
                 "tools": "tools",
-                "replan_check": "replan_checker",
                 "end": END,
             }
         )
 
-        # After tools, go back to executor
-        workflow.add_edge("tools", "executor")
-
-        # After replan check, decide what to do
+        # After tools, consolidate results for this step
+        workflow.add_edge("tools", "consolidate")
+        # After consolidation, either execute next step or end
+        def after_consolidate_route(state) -> Literal["execute", "synthesize"]:
+            plan = state.get("plan") or {"steps": []}
+            steps = plan.get("steps", [])
+            idx = int(state.get("step_idx") or 0)
+            return "execute" if idx < len(steps) else "synthesize"
         workflow.add_conditional_edges(
-            "replan_checker",
-            should_continue,
+            "consolidate",
+            after_consolidate_route,
             {
                 "execute": "executor",
-                "replan_check": "planner",  # Replan by going back to planner
-                "end": END,
-                "tools": "tools",
+                "synthesize": "synthesizer",
             }
         )
+
+        # After synthesis, end
+        workflow.add_edge("synthesizer", END)
 
         # Add memory
         memory = MemorySaver()
