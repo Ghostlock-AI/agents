@@ -44,11 +44,101 @@ python3 src/main.py
 
 ## Features
 
-LLM: gpt4o-mini only
+### LLM Support
+- **OpenAI**: GPT-4, GPT-4o, GPT-4o-mini (default)
+- More providers coming: Anthropic Claude, local models (vLLM, Ollama)
 
-Tools:
-Tavily Internet Search
-Shell Tool
+### Tools
+- **Web Search**: DuckDuckGo search (no API key required)
+- **Web Fetch**: Extract content from URLs
+- **Shell Execution**: Run system commands (sandboxed)
 
-Reasoning:
-reAct planning pattern
+### Reasoning Strategies 🧠
+Switch between multiple reasoning strategies at runtime:
+
+- **ReAct** (Default): Iterative reasoning with tool use. Best for general tasks and exploration.
+- **ReWOO**: Plans all steps upfront, executes in parallel. Best for research and data gathering.
+- **Plan-and-Execute**: Creates adaptive plans with replanning. Best for complex multi-step tasks.
+- **LATS**: Tree search with self-reflection. Best for complex problems requiring exploration (slower, higher quality).
+
+### Interactive TUI
+- Multiline input with syntax highlighting
+- File attachment support (`/file <path>`)
+- Rich markdown rendering
+- Runtime strategy switching
+- Session memory across conversations
+
+## Usage
+
+### Interactive Mode
+
+```bash
+python src/main.py
+```
+
+The TUI supports these commands:
+
+**File Operations:**
+```
+/file <path>          Attach a file to your message
+```
+
+**Reasoning Strategy:**
+```
+/reasoning list       List all available strategies
+/reasoning current    Show current strategy
+/reasoning switch <name>   Switch to: react, rewoo, plan-execute, or lats
+/reasoning info [name]     Show detailed info about a strategy
+```
+
+**Input Mode:**
+```
+/enter send           Send on Enter (default)
+/enter newline        Newline on Enter, double-newline to send
+```
+
+**Exit:**
+```
+/quit                 Exit the application
+```
+
+### One-Shot Mode
+
+Run a single query and exit:
+
+```bash
+python src/main.py "What is the weather in San Francisco?"
+```
+
+### Reasoning Strategy Examples
+
+**For general queries** (default):
+```
+/reasoning switch react
+```
+
+**For research tasks** (parallel execution):
+```
+/reasoning switch rewoo
+Tell me about the history of AI and current state of LLMs
+```
+
+**For complex multi-step tasks**:
+```
+/reasoning switch plan-execute
+Create a complete Python project structure for a web API
+```
+
+**For complex problems requiring exploration**:
+```
+/reasoning switch lats
+Optimize this sorting algorithm for performance
+```
+
+### Testing
+
+Run the test suite to verify all strategies:
+
+```bash
+python test_strategies.py
+```

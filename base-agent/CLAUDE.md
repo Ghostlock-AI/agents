@@ -2,20 +2,31 @@
 
 A foundational AI agent framework built with LangGraph, designed to serve as the basis for specialized agent systems with advanced reasoning, tool use, and memory capabilities.
 
-## Current State (Phase 1 - In Progress)
+## Current State (Phase 2 - Advanced Reasoning Complete)
 
 ### ✅ Implemented Features
 
 **Core Infrastructure:**
-- **LangGraph ReAct Loop**: Reasoning + Action pattern for tool-based problem solving
+- **Multiple Reasoning Strategies**: ReAct, ReWOO, Plan-and-Execute, LATS with runtime switching
+- **Strategy Registry**: Centralized management and dynamic strategy loading
 - **Multi-LLM Support**: OpenAI integration (Anthropic & local models coming)
-- **Tool System**: Web search (Tavily) and shell execution with safety guardrails
+- **Tool System**: DuckDuckGo search, web fetch, and shell execution with safety guardrails
 - **Session Memory**: Conversation context maintained via LangGraph's MemorySaver
-- **CLI Interface**: Simple interactive chat with streaming responses
+- **Enhanced CLI Interface**: TUI with reasoning strategy commands and visualization
 - **Tool Visibility**: `[TOOL: name]` notifications show when agent uses tools
+- **Strategy Indicators**: Shows active strategy in status messages
+
+**Reasoning Strategies:**
+- **ReAct**: Iterative reasoning with tool use (default, most reliable)
+- **ReWOO**: Upfront planning with parallel execution (fastest for research)
+- **Plan-and-Execute**: Adaptive planning with replanning (best for complex tasks)
+- **LATS**: Tree search with self-reflection (highest quality, slower)
 
 **Architecture:**
-- Modular design: `agent.py`, `reasoning.py`, `tools.py`, `cli.py`
+- Modular design with strategy pattern: `reasoning/strategies/`, `strategy_registry.py`
+- Base strategy interface with extensibility support
+- Runtime strategy switching without restart
+- Strategy-specific configuration and tracing
 - External system prompt loaded from file
 - Environment-based configuration (.env)
 - Type-safe state management with Pydantic
@@ -24,10 +35,10 @@ A foundational AI agent framework built with LangGraph, designed to serve as the
 
 - No file context management yet
 - No long-term memory (ChromaDB not integrated)
-- Single reasoning strategy (ReAct only)
-- Limited to OpenAI models
+- Limited to OpenAI models (multi-provider coming)
 - No session persistence to disk
-- No sub-agent support
+- No sub-agent support (orchestrator-worker pattern coming)
+- LATS is simplified version (full MCTS coming)
 
 ---
 
@@ -83,29 +94,31 @@ A foundational AI agent framework built with LangGraph, designed to serve as the
 
 ---
 
-### Phase 2: Advanced Reasoning
+### Phase 2: Advanced Reasoning ✅ COMPLETED
 
-**LATS Implementation**
-- Monte Carlo Tree Search for complex problem solving
-- Self-reflection at each decision node
-- Exploration vs exploitation balancing
-- 94.4% target on HumanEval benchmark
+**✅ Multiple Reasoning Strategies**
+- ReAct: Iterative tool use (production-ready)
+- ReWOO: Parallel planning and execution
+- Plan-and-Execute: Adaptive planning with replanning
+- LATS: Tree search with self-reflection (simplified version)
 
-**Extended Thinking Protocol**
-- Anthropic's "think before act" pattern
-- Reasoning traces visible to user
-- Token budget control for thinking depth
+**✅ Strategy Registry System**
+- Runtime strategy switching via TUI commands
+- Centralized strategy management
+- Strategy-specific configuration
+- Extensible architecture for custom strategies
 
-**Self-Reflection Mechanism**
-- Automatic error detection & correction
-- Solution quality evaluation
-- Alternative approach consideration
+**✅ Reasoning Visualization**
+- Strategy indicators in status messages
+- Tool call notifications
+- Special markers for planning/reflection steps
+- Trace information available via API
 
-**Sub-Agent Spawning**
-- Manual sub-agent invocation
-- Isolated context windows
-- Structured output contracts
-- Result aggregation
+**🚧 Still TODO in Phase 2:**
+- Full MCTS implementation for LATS (current is simplified)
+- Extended thinking protocol with token budgets
+- More advanced self-reflection scoring
+- Sub-Agent Spawning (moved to Phase 4)
 
 ---
 
