@@ -39,6 +39,7 @@ try:
     from rich.layout import Layout
     from rich.panel import Panel
     from rich.live import Live
+    from rich.spinner import SPINNERS
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -713,8 +714,19 @@ def stream_response(agent, prompt: str, session_id: str) -> None:
 
     status_msg = f"[blue]{strategy_label} Thinking..." if HAS_RICH else f"{strategy_label} Thinking..."
 
+    def _pick_spinner_name() -> str:
+        if not HAS_RICH:
+            return "dots"
+        for name in ("squareCorners", "dots9", "dots12", "dots"):
+            try:
+                if name in SPINNERS:
+                    return name
+            except Exception:
+                break
+        return "dots"
+
     if HAS_RICH:
-        with console.status(status_msg, spinner="dots"):
+        with console.status(status_msg, spinner=_pick_spinner_name(), spinner_style="color(245)"):
             try:
                 for chunk in agent.stream(prompt, session_id):
                     if chunk:
@@ -818,9 +830,10 @@ def _run_tui(agent, session_id: str) -> None:
             completer = WordCompleter(["/file", "/enter", "/reasoning", "/quit"])
 
     # Style for the left bar
+    # Use prompt_toolkit-supported color syntax (hex), not Rich-style 'color(n)'
     style = Style.from_dict({
-        "blockquote.prefix": "ansibrightblue",
-        "rule": "ansibrightblack",
+        "blockquote.prefix": "fg:#888888",
+        "rule": "fg:#888888",
     })
 
     bar_tokens = [("class:blockquote.prefix", "▌ ")]
