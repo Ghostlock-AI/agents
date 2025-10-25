@@ -11,12 +11,11 @@ Supports:
 
 Commands:
     /file PATH                attach a local file to this message (with path completion)
-    /enter send               toggle to send-on-enter mode
-    /enter newline            toggle to newline-on-enter mode
     /reasoning list           list all available reasoning strategies
     /reasoning current        show current reasoning strategy
     /reasoning switch NAME    switch to a different reasoning strategy
     /reasoning info [NAME]    show detailed info about a strategy
+    /help                     show available commands
     /quit                     exit the application
 """
 
@@ -766,8 +765,10 @@ def _run_tui(agent, session_id: str) -> None:
         from prompt_toolkit.shortcuts import PromptSession
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.completion import NestedCompleter, PathCompleter
+        from prompt_toolkit.completion import NestedCompleter, PathCompleter, FuzzyCompleter
         from prompt_toolkit.patch_stdout import patch_stdout
+        from prompt_toolkit.filters import Condition
+        from prompt_toolkit.application.current import get_app
     except ImportError:
         print("prompt_toolkit not installed. Run: pip install prompt_toolkit")
         _run_simple_repl(agent, session_id)
@@ -776,14 +777,32 @@ def _run_tui(agent, session_id: str) -> None:
     # Display simple text-only startup banner
     display_startup_banner(agent, animate=False)
 
-    # Enter key behavior: default send-on-enter; can toggle to newline-on-enter
-    send_on_enter = [True]
+    def _print_commands_hint() -> None:
+        try:
+            if HAS_RICH:
+                console.print()
+                console.print("[color(245)]/file — attach a local file[/color(245)]")
+                console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
+                console.print("[color(245)]/help — show available commands[/color(245)]")
+                console.print("[color(245)]/quit — exit application[/color(245)]")
+                console.print()
+            else:
+                print()
+                print("/file — attach a local file")
+                print("/reasoning — list or switch strategy")
+                print("/help — show available commands")
+                print("/quit — exit application")
+                print()
+        except Exception:
+            pass
+
+    _print_commands_hint()
 
     # Build completer
     try:
-        completer = NestedCompleter.from_nested_dict({
-            "/file": PathCompleter(expanduser=True),
-            "/enter": {"send": None, "newline": None},
+        base_completer = NestedCompleter.from_nested_dict({
+            "/file": PathCompleter(expanduser=True, only_directories=False),
+            "/help": None,
             "/reasoning": {
                 "list": None,
                 "current": None,
@@ -802,11 +821,12 @@ def _run_tui(agent, session_id: str) -> None:
             },
             "/quit": None,
         })
+        completer = FuzzyCompleter(base_completer)
     except AttributeError:
         try:
-            completer = NestedCompleter({
-                "/file": PathCompleter(expanduser=True),
-                "/enter": {"send": None, "newline": None},
+            base_completer = NestedCompleter({
+                "/file": PathCompleter(expanduser=True, only_directories=False),
+                "/help": None,
                 "/reasoning": {
                     "list": None,
                     "current": None,
@@ -825,9 +845,10 @@ def _run_tui(agent, session_id: str) -> None:
                 },
                 "/quit": None,
             })
+            completer = FuzzyCompleter(base_completer)
         except Exception:
             from prompt_toolkit.completion import WordCompleter
-            completer = WordCompleter(["/file", "/enter", "/reasoning", "/quit"])
+            completer = WordCompleter(["/file", "/reasoning", "/help", "/quit"])
 
     # Style for the left bar
     # Use prompt_toolkit-supported color syntax (hex), not Rich-style 'color(n)'
@@ -889,29 +910,49 @@ def _run_tui(agent, session_id: str) -> None:
             # If anything goes wrong, quietly skip recolor
             pass
 
-    # Key bindings
+    # Key bindings: Enter submits; Shift/Ctrl/Alt-Enter insert newline; Ctrl-S submits
     kb = KeyBindings()
-
-    @kb.add("enter")
+    # Detect when the completion menu is open
+    menu_visible = Condition(lambda: get_app().current_buffer.complete_state is not None)
+    @kb.add("enter", filter=menu_visible)
     def _(event):
+        # If the completion menu is visible, Enter should not submit.
+        # Apply the highlighted completion (select first if none yet).
+        b = event.current_buffer
+        st = b.complete_state
+        if st is not None:
+            if st.current_completion is None:
+                # Ensure something is selected before applying.
+                b.complete_next()
+                st = b.complete_state
+            if st and st.current_completion is not None:
+                b.apply_completion(st.current_completion)
+
+    @kb.add("enter", filter=~menu_visible)
+    def _(event):
+        # Only submit when no completion dropdown is visible.
         buf = event.app.current_buffer
-        doc = buf.document
-        if send_on_enter[0]:
-            if doc.text.strip() == "":
-                return
-            buf.validate_and_handle()
-        else:
-            at_end = doc.cursor_position == len(doc.text)
-            blank_line = doc.current_line.strip() == ""
-            has_content = doc.text.strip() != ""
-            if at_end and blank_line and has_content and doc.text.endswith("\n"):
-                buf.validate_and_handle()
-            else:
-                buf.insert_text("\n")
+        if buf.document.text.strip() == "":
+            return
+        buf.validate_and_handle()
 
-    @kb.add("c-j")
+    # Navigate completion menu with Up/Down and Tab / Shift-Tab
+    @kb.add("down", filter=menu_visible)
     def _(event):
-        event.current_buffer.insert_text("\n")
+        event.current_buffer.complete_next()
+
+    @kb.add("up", filter=menu_visible)
+    def _(event):
+        event.current_buffer.complete_previous()
+
+    # Also support Tab / Shift-Tab cycling
+    @kb.add("tab")
+    def _(event):
+        event.current_buffer.complete_next()
+
+    @kb.add("s-tab")
+    def _(event):
+        event.current_buffer.complete_previous()
 
     for key_name in ("s-enter", "s-return"):
         try:
@@ -929,9 +970,14 @@ def _run_tui(agent, session_id: str) -> None:
         except Exception:
             pass
 
-    @kb.add("c-s")
+    @kb.add("c-s", filter=~menu_visible)
     def _(event):
+        # Submit only when no completion dropdown is visible.
         event.app.current_buffer.validate_and_handle()
+
+    @kb.add("c-j")
+    def _(event):
+        event.current_buffer.insert_text("\n")
 
     @kb.add("c-q")
     def _(event):
@@ -952,6 +998,8 @@ def _run_tui(agent, session_id: str) -> None:
                         multiline=True,
                         prompt_continuation=prompt_continuation,
                         complete_while_typing=True,
+                        reserve_space_for_menu=8,
+                        complete_in_thread=True,
                         key_bindings=kb,
                     )
                 except EOFError:
@@ -968,20 +1016,17 @@ def _run_tui(agent, session_id: str) -> None:
 
             # Handle /enter command
             ts = text.strip()
-            if ts.startswith("/enter"):
-                parts = ts.split(None, 1)
-                if len(parts) == 2:
-                    arg = parts[1].strip().lower()
-                    if arg in {"send", "newline"}:
-                        send_on_enter[0] = (arg == "send")
-                        mode = "send-on-enter" if send_on_enter[0] else "newline-on-enter"
-                        print(f"[client] Enter mode: {mode}")
-                        continue
-                print("[client] Usage: /enter send | /enter newline")
+            # Remove legacy /enter handling
+
+            # Fast-path: /help (no separator or LLM)
+            if ts.startswith("/help") or ts == "/?":
+                _recolor_last_prompt_submission(text)
+                _print_commands_hint()
                 continue
 
             # Handle /reasoning command
             if ts.startswith("/reasoning"):
+                _recolor_last_prompt_submission(text)
                 parts = ts.split()[1:]  # Get all parts after /reasoning
                 handle_reasoning_command(agent, parts)
                 continue
@@ -1016,7 +1061,16 @@ def _run_simple_repl(agent, session_id: str) -> None:
     display_startup_banner(agent)
 
     print("\nType 'exit', 'quit', 'q' to quit.")
-    print("Commands: /file <path>, /reasoning <list|current|switch|info>, /quit")
+    if HAS_RICH:
+        console.print("[color(245)]/file — attach a local file[/color(245)]")
+        console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
+        console.print("[color(245)]/help — show available commands[/color(245)]")
+        console.print("[color(245)]/quit — exit application[/color(245)]")
+    else:
+        print("/file — attach a local file")
+        print("/reasoning — list or switch strategy")
+        print("/help — show available commands")
+        print("/quit — exit application")
     print("-" * 60)
     print()
 
@@ -1036,9 +1090,22 @@ def _run_simple_repl(agent, session_id: str) -> None:
             print("\nGoodbye!")
             break
 
-        # Handle /enter command
-        if text.startswith("/enter"):
-            print("[client] /enter not supported in simple mode")
+        # /enter removed
+
+        # Handle /help (no LLM)
+        if text.startswith("/help") or text == "/?":
+            print()
+            if HAS_RICH:
+                console.print("[color(245)]/file — attach a local file[/color(245)]")
+                console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
+                console.print("[color(245)]/help — show available commands[/color(245)]")
+                console.print("[color(245)]/quit — exit application[/color(245)]")
+            else:
+                print("/file — attach a local file")
+                print("/reasoning — list or switch strategy")
+                print("/help — show available commands")
+                print("/quit — exit application")
+            print()
             continue
 
         # Handle /reasoning command
