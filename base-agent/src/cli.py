@@ -26,10 +26,18 @@ import os
 import sys
 from typing import List, Tuple
 import shutil
+import time
+from pathlib import Path
+import threading
+import re
+import glob
 
 try:
     from rich.console import Console
     from rich.markdown import Markdown
+    from rich.layout import Layout
+    from rich.panel import Panel
+    from rich.live import Live
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -37,6 +45,405 @@ except ImportError:
     Markdown = None
 
 console = Console() if HAS_RICH else None
+
+# Banner sizing (can override with env var)
+BANNER_MAX_WIDTH = None
+try:
+    _bw = os.getenv("BANNER_MAX_WIDTH")
+    if _bw:
+        BANNER_MAX_WIDTH = max(40, min(120, int(_bw)))
+except Exception:
+    BANNER_MAX_WIDTH = None
+
+# Persistent mascot toggle
+PERSISTENT_MASCOT = (os.getenv("PERSISTENT_MASCOT", "1").strip() not in {"0", "false", "False", "no", ""})
+
+# Optional: OpenCV for PNG -> ASCII conversion
+try:
+    import cv2  # type: ignore
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+
+# Simple 2-frame slime animation - hardcoded ASCII art
+SLIME_FRAMES = [
+    # Frame 1 - normal
+    """
+       @@@@@
+     @@@@@@@@@
+    @@@@@@@@@@@
+   @@@@@@@@@@@@@
+    @@@@@@@@@@@
+     @@@@@@@@@
+       @@@@@
+    """,
+    # Frame 2 - squished (slight variation)
+    """
+      @@@@@@@
+    @@@@@@@@@@@
+   @@@@@@@@@@@@@
+  @@@@@@@@@@@@@@@
+   @@@@@@@@@@@@@
+    @@@@@@@@@@@
+      @@@@@@@
+    """
+]
+
+
+# Simple banner helpers from simple_banner.py (legacy)
+def image_to_ascii(image_path: str, width: int = 40) -> str:
+    """Convert image to ASCII using Pillow (if available).
+
+    Returns an empty string if Pillow is not installed or on failure.
+    """
+    try:
+        from PIL import Image  # type: ignore
+    except Exception:
+        return ""
+    try:
+        img = Image.open(image_path).convert('L')
+
+        # Resize with approximate character aspect ratio
+        aspect_ratio = img.height / img.width if img.width else 1.0
+        height = int(width * aspect_ratio * 0.45)
+        height = max(1, height)
+        img = img.resize((width, height))
+
+        chars = " .:-=+*#%@"
+        ascii_art_lines: List[str] = []
+        for y in range(img.height):
+            row = []
+            for x in range(img.width):
+                pixel = img.getpixel((x, y))
+                idx = min(int(pixel / 255 * (len(chars) - 1)), len(chars) - 1)
+                row.append(chars[idx])
+            ascii_art_lines.append("".join(row))
+        return "\n".join(ascii_art_lines)
+    except Exception:
+        return ""
+
+
+STATIC_SLIME = """
+    .@@@@@.
+   @@@@@@@@@
+  @@@@@@@@@@@
+ @@@@@@@@@@@@@
+  @@@@@@@@@@@
+   @@@@@@@@@
+    @@@@@@@
+"""
+
+
+def load_frames_from_txt(directory: str) -> List[str]:
+    """Load ASCII frames from text files in a directory (frame_*.txt)."""
+    try:
+        frame_files = sorted(glob.glob(f"{directory}/frame_*.txt"))
+        frames: List[str] = []
+        for f in frame_files:
+            with open(f, 'r') as file:
+                frames.append(file.read())
+        return frames
+    except Exception:
+        return []
+
+
+def show_animated_banner(text_content: str, ascii_frames: List[str] | None = None, duration: float = 3.0) -> None:
+    """Show banner with optional animation (legacy helper)."""
+    if not HAS_RICH:
+        # Fallback text-only
+        _display_static_banner(text_content)
+        return
+
+    if not ascii_frames:
+        # Show static simple slime + text using our compact panel
+        panel = Panel(text_content, border_style="blue")
+        console.print(panel)
+        return
+
+    fps = 12
+    with Live(console=console, refresh_per_second=fps) as live:
+        start = time.time()
+        while time.time() - start < duration:
+            frame_idx = int((time.time() - start) * fps) % len(ascii_frames)
+            ascii_art = ascii_frames[frame_idx]
+            panel = _make_compact_banner(ascii_art, text_content)
+            live.update(panel)
+            time.sleep(1 / fps)
+
+def _make_compact_banner(left_art: str, text_content: str) -> Panel:
+    """Render a single compact panel with ASCII mascot on the left and text on the right."""
+    from rich.table import Table
+
+    # Compute widths
+    ascii_lines = left_art.splitlines() if left_art else []
+    ascii_width = max((len(ln) for ln in ascii_lines), default=0)
+
+    term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
+    # Keep things small and readable
+    default_cap = 60
+    cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else default_cap
+    max_panel = min(cap, max(46, term_width - 8))
+    # Allocate space to text after the mascot and a small gap
+    text_target = max_panel - (ascii_width + 3)
+    if text_target < 24:
+        # if terminal is very narrow, reduce mascot width effect
+        text_target = 24
+
+    # Build a compact grid with fixed first column
+    table = Table.grid(padding=(0, 1))
+    table.expand = False
+    if ascii_width > 0:
+        table.add_column(no_wrap=True, width=ascii_width)
+    else:
+        table.add_column(no_wrap=True)
+    table.add_column(no_wrap=False, width=text_target)
+    table.add_row(left_art, text_content)
+
+    panel = Panel(
+        table,
+        border_style="blue",
+        title="[blue]Base Agent[/blue]",
+        width=max_panel,
+    )
+    return panel
+
+
+# Persistent mascot animation management
+_mascot_thread: threading.Thread | None = None
+_mascot_stop: threading.Event | None = None
+
+
+def _start_persistent_mascot(agent) -> None:
+    """Start a background thread that keeps the mascot animating above the prompt.
+
+    Pauses during streaming and resumes afterwards. Uses PNG frames when available,
+    falls back to built-in ASCII frames otherwise.
+    """
+    global _mascot_thread, _mascot_stop
+    if not HAS_RICH:
+        return
+    if _mascot_thread and _mascot_thread.is_alive():
+        return
+
+    _mascot_stop = threading.Event()
+
+    def _runner():
+        # Prepare frames: prefer pre-generated ASCII, else PNGs, else built-in
+        frames = _load_ascii_text_frames(directory="ascii_frames", max_frames=10) \
+            or _load_png_mascot_frames(max_frames=2, width=20) \
+            or SLIME_FRAMES
+        if not frames:
+            return
+        fps = 3
+        frame_delay = 1.0 / fps
+
+        try:
+            with Live(console=console, refresh_per_second=fps) as live:
+                i = 0
+                while not _mascot_stop.is_set():  # type: ignore[attr-defined]
+                    # Recompute text to reflect current strategy/model
+                    model_name = agent.model_name
+                    current_strategy = agent.get_current_strategy_name()
+                    strategy_info = agent.get_strategy_info(current_strategy)
+                    text_content = f"""[magenta]agent:[/] Base Agent\n[magenta]model:[/] {model_name}\n[magenta]planning:[/] {current_strategy.upper()} - {strategy_info['description'].split('.')[0]}\n[magenta]tools:[/]\n  - internet search (DuckDuckGo)\n  - web fetch (HTTP/HTTPS)\n  - command line (shell)"""
+
+                    ascii_art = frames[i % len(frames)]
+                    panel = _make_compact_banner(ascii_art, text_content)
+                    live.update(panel)
+                    i += 1
+                    # Sleep in small increments to react to stop quickly
+                    end_time = time.time() + frame_delay
+                    while time.time() < end_time:
+                        if _mascot_stop.is_set():
+                            break
+                        time.sleep(0.02)
+        except Exception:
+            # Best-effort; don't crash REPL on animation issues
+            pass
+
+    _mascot_thread = threading.Thread(target=_runner, name="mascot", daemon=True)
+    _mascot_thread.start()
+
+
+def _stop_persistent_mascot() -> None:
+    """Stop the background mascot animation if running."""
+    global _mascot_thread, _mascot_stop
+    if _mascot_stop is not None:
+        _mascot_stop.set()
+    if _mascot_thread is not None:
+        try:
+            _mascot_thread.join(timeout=1.0)
+        except Exception:
+            pass
+    _mascot_thread = None
+    _mascot_stop = None
+
+
+def _image_to_ascii_cv2(image_path: str, width: int = 20) -> str:
+    """Convert an image to ASCII art using OpenCV (no Pillow dependency).
+
+    Args:
+        image_path: Path to the PNG/JPG image.
+        width: Target character width for ASCII rendering.
+
+    Returns:
+        ASCII art string for the image.
+    """
+    if not HAS_CV2:
+        return ""
+
+    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return ""
+
+    # Split alpha if present
+    alpha = None
+    if len(img.shape) == 3 and img.shape[2] == 4:
+        b, g, r, a = cv2.split(img)
+        gray = cv2.cvtColor(cv2.merge((b, g, r)), cv2.COLOR_BGR2GRAY)
+        alpha = a
+    elif len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+
+    h, w = gray.shape[:2]
+    if w == 0:
+        return ""
+
+    # Account for character aspect ratio (roughly 2:1 height:width)
+    target_height = max(1, int((h / w) * width * 0.5))
+    resized = cv2.resize(gray, (width, target_height), interpolation=cv2.INTER_AREA)
+    resized_alpha = None
+    if alpha is not None:
+        resized_alpha = cv2.resize(alpha, (width, target_height), interpolation=cv2.INTER_AREA)
+
+    # Denser ramp for better detail
+    chars = " .,:;i1tfLCG08@"
+    buckets = len(chars) - 1
+
+    lines: List[str] = []
+    for y in range(resized.shape[0]):
+        row_chars = []
+        for x in range(resized.shape[1]):
+            # Transparent -> space
+            if resized_alpha is not None and int(resized_alpha[y, x]) < 16:
+                row_chars.append(" ")
+                continue
+
+            px = int(resized[y, x])
+            idx = min(buckets, (px * buckets) // 255)
+            row_chars.append(chars[idx])
+        lines.append("".join(row_chars))
+
+    return "\n".join(lines)
+
+
+def _load_png_mascot_frames(max_frames: int = 2, width: int = 20) -> List[str]:
+    """Search for PNG mascot frames at repo root and convert to ASCII.
+
+    Looks for files named like slime*.png next to the project root.
+
+    Args:
+        max_frames: Maximum number of frames to use for animation.
+        width: ASCII width per frame.
+
+    Returns:
+        List of ASCII frame strings (possibly length 0 or 1).
+    """
+    if not HAS_CV2:
+        return []
+
+    try:
+        base_dir = Path(__file__).resolve().parent.parent
+        candidates = sorted(p for p in base_dir.glob("slime*.png") if p.is_file())
+        if not candidates:
+            return []
+
+        frames: List[str] = []
+        for p in candidates[:max_frames]:
+            ascii_frame = _image_to_ascii_cv2(str(p), width=width)
+            if ascii_frame:
+                frames.append(ascii_frame)
+
+        return frames
+    except Exception:
+        return []
+
+
+def _load_ascii_text_frames(directory: str = "ascii_frames", max_frames: int = 10) -> List[str]:
+    """Load pre-generated ASCII frames from a directory (frame_*.txt)."""
+    try:
+        base_dir = Path(__file__).resolve().parent.parent / directory
+        files = sorted(base_dir.glob("frame_*.txt"))[:max_frames]
+        frames: List[str] = []
+        for fp in files:
+            frames.append(fp.read_text())
+        return frames
+    except Exception:
+        return []
+
+
+def display_startup_banner(agent, animate: bool = True, duration: float = 3.0) -> None:
+    """Display a simple text-only startup banner with agent info."""
+    # Get agent info
+    model_name = agent.model_name
+    current_strategy = agent.get_current_strategy_name()
+    strategy_info = agent.get_strategy_info(current_strategy)
+
+    # Format the text content
+    text_content = f"""[magenta]agent:[/] Base Agent
+[magenta]model:[/] {model_name}
+[magenta]planning:[/] {current_strategy.upper()} - {strategy_info['description'].split('.')[0]}
+[magenta]tools:[/]
+  - internet search (DuckDuckGo)
+  - web fetch (HTTP/HTTPS)
+  - command line (shell)"""
+
+    if HAS_RICH:
+        # Text-only panel, auto-widen to fit content and planning line
+        def _strip_rich_tags(s: str) -> str:
+            # Remove [tag] and [/tag] patterns for width calc
+            return re.sub(r"\[[^\]]*\]", "", s)
+
+        visible = _strip_rich_tags(text_content)
+        longest = max((len(line) for line in visible.splitlines()), default=0)
+
+        term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
+        # Base desired width adds padding for borders, keep it reasonably wide
+        desired = longest + 4
+        min_w = 72
+        default_cap = min(max(term_width - 4, min_w), 120)
+        cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else default_cap
+        width_target = min(max(desired, min_w), cap)
+
+        panel = Panel(text_content, border_style="blue", width=width_target)
+        console.print()
+        console.print(panel)
+        return
+    else:
+        # Fallback for non-rich display
+        _display_static_banner(text_content)
+
+
+def _display_static_banner(text_content: str) -> None:
+    """Display static banner without animation."""
+    if HAS_RICH:
+        width_cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else 60
+        panel = Panel(text_content, border_style="blue", width=width_cap)
+        console.print()
+        console.print(panel)
+    else:
+        # Fallback for non-rich display
+        print()
+        print("=" * 60)
+        print("agent: Base Agent")
+        print(f"model: {text_content.split('model:[/] ')[1].split('[')[0].strip()}")
+        print("tools:")
+        print("  - internet search (DuckDuckGo)")
+        print("  - web fetch (HTTP/HTTPS)")
+        print("  - command line (shell)")
+        print("=" * 60)
 
 
 def _max_backtick_run(s: str) -> int:
@@ -228,6 +635,9 @@ def handle_reasoning_command(agent, args: List[str]) -> bool:
             else:
                 print(f"\n✓ Switched to {new_strategy} strategy\n")
 
+            # Re-display the text-only banner
+            display_startup_banner(agent, animate=False)
+
         except KeyError as e:
             if HAS_RICH:
                 console.print(f"\n[red]Error:[/red] {e}\n")
@@ -341,6 +751,9 @@ def _run_tui(agent, session_id: str) -> None:
         print("prompt_toolkit not installed. Run: pip install prompt_toolkit")
         _run_simple_repl(agent, session_id)
         return
+
+    # Display simple text-only startup banner
+    display_startup_banner(agent, animate=False)
 
     # Enter key behavior: default send-on-enter; can toggle to newline-on-enter
     send_on_enter = [True]
@@ -544,8 +957,10 @@ def _run_tui(agent, session_id: str) -> None:
 
 def _run_simple_repl(agent, session_id: str) -> None:
     """Fallback simple REPL without prompt_toolkit."""
-    print("\nBase Agent - Interactive Chat")
-    print("Type 'exit', 'quit', 'q' to quit.")
+    # Display startup banner
+    display_startup_banner(agent)
+
+    print("\nType 'exit', 'quit', 'q' to quit.")
     print("Commands: /file <path>, /reasoning <list|current|switch|info>, /quit")
     print("-" * 60)
     print()
