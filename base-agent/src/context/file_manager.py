@@ -282,8 +282,10 @@ class FileContextManager:
                 break
 
             if not state.is_summarized:
-                # Summarize this file
-                summary = self._summarize_file(filepath)
+                # Summarize this file (use LLM if available)
+                use_llm = hasattr(self, '_llm') and self._llm is not None
+                llm = self._llm if use_llm else None
+                summary = self._summarize_file(filepath, use_llm=use_llm, llm=llm)
                 if summary:
                     original_tokens = state.token_count or 0
                     summary_tokens = self._count_tokens(summary)
@@ -294,15 +296,14 @@ class FileContextManager:
 
                     tokens_freed += (original_tokens - summary_tokens)
 
-    def _summarize_file(self, filepath: str) -> Optional[str]:
+    def _summarize_file(self, filepath: str, use_llm: bool = False, llm=None) -> Optional[str]:
         """
         Create a summary of a file.
 
-        For now, this is a simple truncation. In a full implementation,
-        you'd use an LLM to generate a meaningful summary.
-
         Args:
             filepath: Path to file
+            use_llm: Whether to use LLM for intelligent summarization
+            llm: LLM instance to use for summarization (optional)
 
         Returns:
             Summary text
@@ -311,16 +312,57 @@ class FileContextManager:
             with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
 
-            # Simple truncation strategy
             lines = content.split('\n')
 
+            # For small files, no summarization needed
             if len(lines) <= 20:
                 return content
 
-            # Keep first 10 and last 10 lines
+            # LLM-based summarization (if available and enabled)
+            if use_llm and llm:
+                try:
+                    import os
+                    filename = os.path.basename(filepath)
+
+                    summary_prompt = f"""Summarize the following file concisely. Focus on:
+1. Purpose and main functionality
+2. Key components/functions/classes
+3. Important dependencies or imports
+4. Critical logic or algorithms
+
+File: {filename}
+
+Content:
+{content[:4000]}  # Limit to first 4000 chars to avoid token limits
+
+Provide a concise summary (max 200 words):"""
+
+                    response = llm.invoke([{"role": "user", "content": summary_prompt}])
+                    llm_summary = response.content if hasattr(response, 'content') else str(response)
+
+                    # Create enhanced summary with structure
+                    summary_parts = [
+                        f"=== SUMMARY: {filename} ({len(lines)} lines) ===",
+                        llm_summary.strip(),
+                        "",
+                        "=== FIRST 5 LINES ===",
+                        '\n'.join(lines[:5]),
+                        "",
+                        "=== LAST 5 LINES ===",
+                        '\n'.join(lines[-5:]),
+                    ]
+
+                    return '\n'.join(summary_parts)
+
+                except Exception as e:
+                    # Fall back to simple truncation if LLM fails
+                    print(f"Warning: LLM summarization failed ({e}), using truncation")
+
+            # Simple truncation strategy (fallback)
             summary_lines = (
+                [f"=== FILE: {os.path.basename(filepath)} ({len(lines)} lines) ===", ""] +
                 lines[:10] +
-                [f"... [{len(lines) - 20} lines omitted] ..."] +
+                ["", f"... [{len(lines) - 20} lines omitted] ...", ""] +
                 lines[-10:]
             )
 

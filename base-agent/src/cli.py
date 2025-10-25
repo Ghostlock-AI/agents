@@ -15,6 +15,12 @@ Commands:
     /reasoning current        show current reasoning strategy
     /reasoning switch NAME    switch to a different reasoning strategy
     /reasoning info [NAME]    show detailed info about a strategy
+    /context add PATH         add file to context for enhanced awareness
+    /context remove PATH      remove file from context
+    /context list             list all files in context
+    /context search QUERY     semantically search context files
+    /context stats            show context usage statistics
+    /context clear            clear all files from context
     /help                     show available commands
     /quit                     exit the application
 """
@@ -703,6 +709,206 @@ def handle_reasoning_command(agent, args: List[str]) -> bool:
         return True
 
 
+def handle_context_command(agent, args: List[str]) -> bool:
+    """
+    Handle /context commands.
+
+    Args:
+        agent: The agent instance
+        args: Command arguments (e.g., ['add', 'file.py'], ['list'])
+
+    Returns:
+        True if command was handled, False otherwise
+    """
+    if not args:
+        print("[client] Usage: /context <add|remove|list|search|stats|clear>")
+        return True
+
+    subcommand = args[0].lower()
+
+    if subcommand == "add":
+        # Add file to context
+        if len(args) < 2:
+            print("[client] Usage: /context add <filepath>")
+            return True
+
+        filepath = " ".join(args[1:])  # Handle paths with spaces
+        success, message = agent.add_context_file(filepath)
+
+        if success:
+            if HAS_RICH:
+                console.print(f"\n[green]✓[/green] {message}\n")
+            else:
+                print(f"\n✓ {message}\n")
+        else:
+            if HAS_RICH:
+                console.print(f"\n[red]✗[/red] {message}\n")
+            else:
+                print(f"\n✗ {message}\n")
+
+        return True
+
+    elif subcommand == "remove":
+        # Remove file from context
+        if len(args) < 2:
+            print("[client] Usage: /context remove <filepath>")
+            return True
+
+        filepath = " ".join(args[1:])
+        success, message = agent.remove_context_file(filepath)
+
+        if success:
+            if HAS_RICH:
+                console.print(f"\n[green]✓[/green] {message}\n")
+            else:
+                print(f"\n✓ {message}\n")
+        else:
+            if HAS_RICH:
+                console.print(f"\n[red]✗[/red] {message}\n")
+            else:
+                print(f"\n✗ {message}\n")
+
+        return True
+
+    elif subcommand == "list":
+        # List all files in context
+        files = agent.list_context_files()
+
+        if not files:
+            print("\n[client] No files in context\n")
+            return True
+
+        if HAS_RICH:
+            console.print("\n[bold cyan]Files in Context:[/bold cyan]\n")
+            for file_state in files:
+                import os
+                filename = os.path.basename(file_state.filepath)
+                tokens = f"{file_state.token_count:,}" if file_state.token_count else "?"
+                version = file_state.version
+                summarized = " [dim](summarized)[/dim]" if file_state.is_summarized else ""
+
+                console.print(f"  [bold]{filename}[/bold]{summarized}")
+                console.print(f"    Path: {file_state.filepath}")
+                console.print(f"    Tokens: {tokens} | Version: {version} | Refs: {file_state.reference_count}")
+                console.print()
+        else:
+            print("\nFiles in Context:\n")
+            for file_state in files:
+                import os
+                filename = os.path.basename(file_state.filepath)
+                tokens = f"{file_state.token_count:,}" if file_state.token_count else "?"
+                summarized = " (summarized)" if file_state.is_summarized else ""
+
+                print(f"  {filename}{summarized}")
+                print(f"    Path: {file_state.filepath}")
+                print(f"    Tokens: {tokens} | Version: {file_state.version} | Refs: {file_state.reference_count}")
+                print()
+
+        return True
+
+    elif subcommand == "search":
+        # Semantic search through context
+        if len(args) < 2:
+            print("[client] Usage: /context search <query>")
+            return True
+
+        query = " ".join(args[1:])
+        results = agent.search_context(query, n_results=5)
+
+        if not results:
+            print(f"\n[client] No results found for: {query}\n")
+            return True
+
+        if HAS_RICH:
+            console.print(f"\n[bold cyan]Search Results for:[/bold cyan] [italic]{query}[/italic]\n")
+            for i, result in enumerate(results, 1):
+                import os
+                filename = os.path.basename(result.filepath)
+                similarity = result.similarity
+                console.print(f"{i}. [bold]{filename}[/bold] (similarity: {similarity:.2%})")
+                console.print(f"   Path: {result.filepath}")
+                # Show snippet
+                snippet = result.content[:100].replace('\n', ' ')
+                console.print(f"   [dim]{snippet}...[/dim]")
+                console.print()
+        else:
+            print(f"\nSearch Results for: {query}\n")
+            for i, result in enumerate(results, 1):
+                import os
+                filename = os.path.basename(result.filepath)
+                similarity = result.similarity
+                print(f"{i}. {filename} (similarity: {similarity:.2%})")
+                print(f"   Path: {result.filepath}")
+                snippet = result.content[:100].replace('\n', ' ')
+                print(f"   {snippet}...")
+                print()
+
+        return True
+
+    elif subcommand == "stats":
+        # Show context statistics
+        stats = agent.get_context_stats()
+
+        if not stats:
+            print("\n[client] Context management is not enabled\n")
+            return True
+
+        if HAS_RICH:
+            console.print("\n[bold cyan]Context Statistics:[/bold cyan]\n")
+            console.print(f"  Total Files: [bold]{stats.total_files}[/bold]")
+            console.print(f"  Total Tokens: [bold]{stats.total_tokens:,}[/bold] / {stats.max_tokens:,}")
+            console.print(f"  Files Summarized: {stats.files_summarized}")
+
+            # Utilization bar
+            util_pct = stats.utilization * 100
+            if stats.is_critical:
+                color = "red"
+            elif stats.is_near_limit:
+                color = "yellow"
+            else:
+                color = "green"
+
+            console.print(f"  Utilization: [{color}]{util_pct:.1f}%[/{color}]")
+
+            if stats.is_critical:
+                console.print("\n[red]⚠ Warning: Context is at critical level![/red]")
+            elif stats.is_near_limit:
+                console.print("\n[yellow]⚠ Note: Context is nearing limit[/yellow]")
+
+            console.print()
+        else:
+            print("\nContext Statistics:\n")
+            print(f"  Total Files: {stats.total_files}")
+            print(f"  Total Tokens: {stats.total_tokens:,} / {stats.max_tokens:,}")
+            print(f"  Files Summarized: {stats.files_summarized}")
+            print(f"  Utilization: {stats.utilization * 100:.1f}%")
+
+            if stats.is_critical:
+                print("\n⚠ Warning: Context is at critical level!")
+            elif stats.is_near_limit:
+                print("\n⚠ Note: Context is nearing limit")
+
+            print()
+
+        return True
+
+    elif subcommand == "clear":
+        # Clear all context
+        agent.clear_context()
+
+        if HAS_RICH:
+            console.print("\n[green]✓[/green] Context cleared\n")
+        else:
+            print("\n✓ Context cleared\n")
+
+        return True
+
+    else:
+        print(f"[client] Unknown context subcommand: {subcommand}")
+        print("[client] Usage: /context <add|remove|list|search|stats|clear>")
+        return True
+
+
 def stream_response(agent, prompt: str, session_id: str) -> None:
     """Stream response from agent and render with rich markdown."""
     accumulated = ""
@@ -782,6 +988,7 @@ def _run_tui(agent, session_id: str) -> None:
             if HAS_RICH:
                 console.print()
                 console.print("[color(245)]/file — attach a local file[/color(245)]")
+                console.print("[color(245)]/context — manage file context (add/list/search)[/color(245)]")
                 console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
                 console.print("[color(245)]/help — show available commands[/color(245)]")
                 console.print("[color(245)]/quit — exit application[/color(245)]")
@@ -789,6 +996,7 @@ def _run_tui(agent, session_id: str) -> None:
             else:
                 print()
                 print("/file — attach a local file")
+                print("/context — manage file context (add/list/search)")
                 print("/reasoning — list or switch strategy")
                 print("/help — show available commands")
                 print("/quit — exit application")
@@ -819,6 +1027,14 @@ def _run_tui(agent, session_id: str) -> None:
                     "lats": None,
                 },
             },
+            "/context": {
+                "add": PathCompleter(expanduser=True, only_directories=False),
+                "remove": None,
+                "list": None,
+                "search": None,
+                "stats": None,
+                "clear": None,
+            },
             "/quit": None,
         })
         completer = FuzzyCompleter(base_completer)
@@ -843,12 +1059,20 @@ def _run_tui(agent, session_id: str) -> None:
                         "lats": None,
                     },
                 },
+                "/context": {
+                    "add": PathCompleter(expanduser=True, only_directories=False),
+                    "remove": None,
+                    "list": None,
+                    "search": None,
+                    "stats": None,
+                    "clear": None,
+                },
                 "/quit": None,
             })
             completer = FuzzyCompleter(base_completer)
         except Exception:
             from prompt_toolkit.completion import WordCompleter
-            completer = WordCompleter(["/file", "/reasoning", "/help", "/quit"])
+            completer = WordCompleter(["/file", "/reasoning", "/context", "/help", "/quit"])
 
     # Style for the left bar
     # Use prompt_toolkit-supported color syntax (hex), not Rich-style 'color(n)'
@@ -1031,6 +1255,13 @@ def _run_tui(agent, session_id: str) -> None:
                 handle_reasoning_command(agent, parts)
                 continue
 
+            # Handle /context command
+            if ts.startswith("/context"):
+                _recolor_last_prompt_submission(text)
+                parts = ts.split()[1:]  # Get all parts after /context
+                handle_context_command(agent, parts)
+                continue
+
             # Recolor the just-submitted text in-place to low-contrast
             _recolor_last_prompt_submission(text)
 
@@ -1097,11 +1328,13 @@ def _run_simple_repl(agent, session_id: str) -> None:
             print()
             if HAS_RICH:
                 console.print("[color(245)]/file — attach a local file[/color(245)]")
+                console.print("[color(245)]/context — manage file context (add/list/search)[/color(245)]")
                 console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
                 console.print("[color(245)]/help — show available commands[/color(245)]")
                 console.print("[color(245)]/quit — exit application[/color(245)]")
             else:
                 print("/file — attach a local file")
+                print("/context — manage file context (add/list/search)")
                 print("/reasoning — list or switch strategy")
                 print("/help — show available commands")
                 print("/quit — exit application")
@@ -1112,6 +1345,12 @@ def _run_simple_repl(agent, session_id: str) -> None:
         if text.startswith("/reasoning"):
             parts = text.split()[1:]  # Get all parts after /reasoning
             handle_reasoning_command(agent, parts)
+            continue
+
+        # Handle /context command
+        if text.startswith("/context"):
+            parts = text.split()[1:]  # Get all parts after /context
+            handle_context_command(agent, parts)
             continue
 
         # Parse file attachments

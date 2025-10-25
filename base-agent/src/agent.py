@@ -73,6 +73,8 @@ class Agent:
 
         if enable_context:
             self.context_manager = FileContextManager(max_tokens=max_context_tokens)
+            # Pass LLM to context manager for intelligent summarization
+            self.context_manager._llm = self.llm
 
         if enable_vector_store:
             self.vector_store = VectorStore()
