@@ -1,16 +1,15 @@
 """
-CLI - Enhanced command-line interface for agent interaction.
+CLI - Minimal command-line interface for agent interaction.
 
 Supports:
     - Interactive TUI with prompt_toolkit (multiline, path completion)
     - File attachments via /file command
     - Rich markdown rendering
     - One-shot mode: python main.py "your question"
-    - Session-based conversation tracking
     - Runtime reasoning strategy switching
 
 Commands:
-    /file PATH                attach a local file to this message (with path completion)
+    /file PATH                attach a local file to this message
     /reasoning list           list all available reasoning strategies
     /reasoning current        show current reasoning strategy
     /reasoning switch NAME    switch to a different reasoning strategy
@@ -23,437 +22,242 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import List, Tuple
+from typing import List, Tuple, Callable, Dict
+from dataclasses import dataclass
 import shutil
-import time
-from pathlib import Path
-import threading
-import re
-import glob
-import math
 
-try:
-    from rich.console import Console
-    from rich.markdown import Markdown
-    from rich.layout import Layout
-    from rich.panel import Panel
-    from rich.live import Live
-    from rich.spinner import SPINNERS
-    HAS_RICH = True
-except ImportError:
-    HAS_RICH = False
-    Console = None
-    Markdown = None
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.spinner import SPINNERS
 
-console = Console() if HAS_RICH else None
+from prompt_toolkit.shortcuts import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
+from prompt_toolkit.completion import NestedCompleter, PathCompleter, FuzzyCompleter
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.application.current import get_app
 
-# Banner sizing (can override with env var)
-BANNER_MAX_WIDTH = None
-try:
-    _bw = os.getenv("BANNER_MAX_WIDTH")
-    if _bw:
-        BANNER_MAX_WIDTH = max(40, min(120, int(_bw)))
-except Exception:
-    BANNER_MAX_WIDTH = None
-
-# Persistent mascot toggle
-PERSISTENT_MASCOT = (os.getenv("PERSISTENT_MASCOT", "1").strip() not in {"0", "false", "False", "no", ""})
-
-# Optional: OpenCV for PNG -> ASCII conversion
-try:
-    import cv2  # type: ignore
-    HAS_CV2 = True
-except Exception:
-    HAS_CV2 = False
-
-# Simple 2-frame slime animation - hardcoded ASCII art
-SLIME_FRAMES = [
-    # Frame 1 - normal
-    """
-       @@@@@
-     @@@@@@@@@
-    @@@@@@@@@@@
-   @@@@@@@@@@@@@
-    @@@@@@@@@@@
-     @@@@@@@@@
-       @@@@@
-    """,
-    # Frame 2 - squished (slight variation)
-    """
-      @@@@@@@
-    @@@@@@@@@@@
-   @@@@@@@@@@@@@
-  @@@@@@@@@@@@@@@
-   @@@@@@@@@@@@@
-    @@@@@@@@@@@
-      @@@@@@@
-    """
-]
+console = Console()
 
 
-# Simple banner helpers from simple_banner.py (legacy)
-def image_to_ascii(image_path: str, width: int = 40) -> str:
-    """Convert image to ASCII using Pillow (if available).
+# ============================================================================
+# Command Dispatcher
+# ============================================================================
 
-    Returns an empty string if Pillow is not installed or on failure.
-    """
-    try:
-        from PIL import Image  # type: ignore
-    except Exception:
-        return ""
-    try:
-        img = Image.open(image_path).convert('L')
-
-        # Resize with approximate character aspect ratio
-        aspect_ratio = img.height / img.width if img.width else 1.0
-        height = int(width * aspect_ratio * 0.45)
-        height = max(1, height)
-        img = img.resize((width, height))
-
-        chars = " .:-=+*#%@"
-        ascii_art_lines: List[str] = []
-        for y in range(img.height):
-            row = []
-            for x in range(img.width):
-                pixel = img.getpixel((x, y))
-                idx = min(int(pixel / 255 * (len(chars) - 1)), len(chars) - 1)
-                row.append(chars[idx])
-            ascii_art_lines.append("".join(row))
-        return "\n".join(ascii_art_lines)
-    except Exception:
-        return ""
+@dataclass
+class CommandResult:
+    """Result from command execution."""
+    handled: bool = False
+    should_exit: bool = False
+    should_process: bool = False
+    message: str = ""
 
 
-STATIC_SLIME = """
-    .@@@@@.
-   @@@@@@@@@
-  @@@@@@@@@@@
- @@@@@@@@@@@@@
-  @@@@@@@@@@@
-   @@@@@@@@@
-    @@@@@@@
-"""
+class CommandDispatcher:
+    """Centralized command dispatcher for CLI commands."""
 
+    def __init__(self, agent):
+        self.agent = agent
+        self.commands: Dict[str, Callable] = {
+            "help": self._handle_help,
+            "quit": self._handle_quit,
+            "exit": self._handle_quit,
+            "reasoning": self._handle_reasoning,
+        }
 
-def load_frames_from_txt(directory: str) -> List[str]:
-    """Load ASCII frames from text files in a directory (frame_*.txt)."""
-    try:
-        frame_files = sorted(glob.glob(f"{directory}/frame_*.txt"))
-        frames: List[str] = []
-        for f in frame_files:
-            with open(f, 'r') as file:
-                frames.append(file.read())
-        return frames
-    except Exception:
-        return []
+    def dispatch(self, text: str) -> CommandResult:
+        """Dispatch a command and return the result."""
+        text = text.strip()
 
+        if not text:
+            return CommandResult(handled=True, should_exit=False)
 
-def show_animated_banner(text_content: str, ascii_frames: List[str] | None = None, duration: float = 3.0) -> None:
-    """Show banner with optional animation (legacy helper)."""
-    if not HAS_RICH:
-        # Fallback text-only
-        _display_static_banner(text_content)
-        return
+        if text.lower() in {"quit", "q", "exit", "/quit", "/exit"}:
+            return self._handle_quit(text, [])
 
-    if not ascii_frames:
-        # Show static simple slime + text using our compact panel
-        panel = Panel(text_content, border_style="blue")
-        console.print(panel)
-        return
+        if text in {"/help", "/?"}:
+            return self._handle_help(text, [])
 
-    fps = 12
-    with Live(console=console, refresh_per_second=fps) as live:
-        start = time.time()
-        while time.time() - start < duration:
-            frame_idx = int((time.time() - start) * fps) % len(ascii_frames)
-            ascii_art = ascii_frames[frame_idx]
-            panel = _make_compact_banner(ascii_art, text_content)
-            live.update(panel)
-            time.sleep(1 / fps)
+        if text.startswith("/"):
+            parts = text[1:].split()
+            if not parts:
+                return CommandResult(handled=False, should_process=True, message=text)
 
-def _make_compact_banner(left_art: str, text_content: str) -> Panel:
-    """Render a single compact panel with ASCII mascot on the left and text on the right."""
-    from rich.table import Table
+            command = parts[0].lower()
+            args = parts[1:]
 
-    # Compute widths
-    ascii_lines = left_art.splitlines() if left_art else []
-    ascii_width = max((len(ln) for ln in ascii_lines), default=0)
+            handler = self.commands.get(command)
+            if handler:
+                return handler(text, args)
 
-    term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
-    # Keep things small and readable
-    default_cap = 60
-    cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else default_cap
-    max_panel = min(cap, max(46, term_width - 8))
-    # Allocate space to text after the mascot and a small gap
-    text_target = max_panel - (ascii_width + 3)
-    if text_target < 24:
-        # if terminal is very narrow, reduce mascot width effect
-        text_target = 24
+        return CommandResult(handled=False, should_process=True, message=text)
 
-    # Build a compact grid with fixed first column
-    table = Table.grid(padding=(0, 1))
-    table.expand = False
-    if ascii_width > 0:
-        table.add_column(no_wrap=True, width=ascii_width)
-    else:
-        table.add_column(no_wrap=True)
-    table.add_column(no_wrap=False, width=text_target)
-    table.add_row(left_art, text_content)
+    def _handle_help(self, text: str, args: List[str]) -> CommandResult:
+        """Handle /help command."""
+        console.print()
+        console.print("[dim]/file PATH[/dim] — attach a local file")
+        console.print("[dim]/reasoning[/dim] — list or switch strategy")
+        console.print("[dim]/help[/dim] — show available commands")
+        console.print("[dim]/quit[/dim] — exit application")
+        console.print()
+        return CommandResult(handled=True, should_exit=False)
 
-    panel = Panel(
-        table,
-        border_style="blue",
-        title="[blue]Base Agent[/blue]",
-        width=max_panel,
-    )
-    return panel
+    def _handle_quit(self, text: str, args: List[str]) -> CommandResult:
+        """Handle /quit and /exit commands."""
+        return CommandResult(handled=True, should_exit=True)
 
+    def _handle_reasoning(self, text: str, args: List[str]) -> CommandResult:
+        """Handle /reasoning commands."""
+        if not args:
+            console.print("[yellow]Usage: /reasoning <list|current|switch|info>[/yellow]")
+            return CommandResult(handled=True, should_exit=False)
 
-# Persistent mascot animation management
-_mascot_thread: threading.Thread | None = None
-_mascot_stop: threading.Event | None = None
+        subcommand = args[0].lower()
 
+        if subcommand == "list":
+            self._reasoning_list()
+        elif subcommand == "current":
+            self._reasoning_current()
+        elif subcommand == "switch":
+            self._reasoning_switch(args[1:])
+        elif subcommand == "info":
+            self._reasoning_info(args[1:])
+        else:
+            console.print(f"[yellow]Unknown subcommand: {subcommand}[/yellow]")
+            console.print("[yellow]Usage: /reasoning <list|current|switch|info>[/yellow]")
 
-def _start_persistent_mascot(agent) -> None:
-    """Start a background thread that keeps the mascot animating above the prompt.
+        return CommandResult(handled=True, should_exit=False)
 
-    Pauses during streaming and resumes afterwards. Uses PNG frames when available,
-    falls back to built-in ASCII frames otherwise.
-    """
-    global _mascot_thread, _mascot_stop
-    if not HAS_RICH:
-        return
-    if _mascot_thread and _mascot_thread.is_alive():
-        return
+    def _reasoning_list(self) -> None:
+        """List all available reasoning strategies."""
+        strategies = self.agent.list_strategies()
+        console.print("\n[bold cyan]Available Reasoning Strategies:[/bold cyan]\n")
+        for strategy in strategies:
+            marker = "[green]✓[/green] " if strategy["is_current"] else "  "
+            console.print(f"{marker}[bold]{strategy['name']}[/bold]")
+            console.print(f"  {strategy['description']}\n")
 
-    _mascot_stop = threading.Event()
+    def _reasoning_current(self) -> None:
+        """Show current reasoning strategy."""
+        current = self.agent.get_current_strategy_name()
+        info = self.agent.get_strategy_info()
+        console.print(f"\n[bold cyan]Current Strategy:[/bold cyan] [green]{current}[/green]")
+        console.print(f"[dim]{info['description']}[/dim]\n")
 
-    def _runner():
-        # Prepare frames: prefer pre-generated ASCII, else PNGs, else built-in
-        frames = _load_ascii_text_frames(directory="ascii_frames", max_frames=10) \
-            or _load_png_mascot_frames(max_frames=2, width=20) \
-            or SLIME_FRAMES
-        if not frames:
+    def _reasoning_switch(self, args: List[str]) -> None:
+        """Switch to a different reasoning strategy."""
+        if not args:
+            console.print("[yellow]Usage: /reasoning switch <strategy_name>[/yellow]")
             return
-        fps = 3
-        frame_delay = 1.0 / fps
+
+        new_strategy = args[0].lower()
+        try:
+            self.agent.switch_reasoning_strategy(new_strategy)
+            console.print(f"\n[green]✓[/green] Switched to [bold]{new_strategy}[/bold] strategy\n")
+            display_banner(self.agent)
+        except KeyError as e:
+            console.print(f"\n[red]Error:[/red] {e}\n")
+
+    def _reasoning_info(self, args: List[str]) -> None:
+        """Show detailed info about a reasoning strategy."""
+        strategy_name = args[0].lower() if args else None
 
         try:
-            with Live(console=console, refresh_per_second=fps) as live:
-                i = 0
-                while not _mascot_stop.is_set():  # type: ignore[attr-defined]
-                    # Recompute text to reflect current strategy/model
-                    model_name = agent.model_name
-                    current_strategy = agent.get_current_strategy_name()
-                    strategy_info = agent.get_strategy_info(current_strategy)
-                    text_content = f"""[magenta]agent:[/] Base Agent\n[magenta]model:[/] {model_name}\n[magenta]planning:[/] {current_strategy.upper()} - {strategy_info['description'].split('.')[0]}\n[magenta]tools:[/]\n  - internet search (DuckDuckGo)\n  - web fetch (HTTP/HTTPS)\n  - command line (shell)"""
+            info = self.agent.get_strategy_info(strategy_name)
+            console.print(f"\n[bold cyan]Strategy:[/bold cyan] [bold]{info['name']}[/bold]")
+            if info['is_current']:
+                console.print("[green]✓ Currently active[/green]")
+            console.print(f"\n[bold]Description:[/bold]\n{info['description']}")
+            console.print(f"\n[bold]Streaming:[/bold] {'Yes' if info['supports_streaming'] else 'No'}")
 
-                    ascii_art = frames[i % len(frames)]
-                    panel = _make_compact_banner(ascii_art, text_content)
-                    live.update(panel)
-                    i += 1
-                    # Sleep in small increments to react to stop quickly
-                    end_time = time.time() + frame_delay
-                    while time.time() < end_time:
-                        if _mascot_stop.is_set():
-                            break
-                        time.sleep(0.02)
-        except Exception:
-            # Best-effort; don't crash REPL on animation issues
-            pass
+            if info['config']:
+                console.print("\n[bold]Configuration:[/bold]")
+                for key, value in info['config'].items():
+                    console.print(f"  {key}: {value}")
+            console.print()
+        except KeyError as e:
+            console.print(f"\n[red]Error:[/red] {e}\n")
 
-    _mascot_thread = threading.Thread(target=_runner, name="mascot", daemon=True)
-    _mascot_thread.start()
-
-
-def _stop_persistent_mascot() -> None:
-    """Stop the background mascot animation if running."""
-    global _mascot_thread, _mascot_stop
-    if _mascot_stop is not None:
-        _mascot_stop.set()
-    if _mascot_thread is not None:
-        try:
-            _mascot_thread.join(timeout=1.0)
-        except Exception:
-            pass
-    _mascot_thread = None
-    _mascot_stop = None
+    def get_completions(self) -> Dict:
+        """Get command completions for prompt_toolkit."""
+        return {
+            "/file": PathCompleter(expanduser=True, only_directories=False),
+            "/help": None,
+            "/reasoning": {
+                "list": None,
+                "current": None,
+                "switch": {"react": None, "rewoo": None, "plan-execute": None, "lats": None},
+                "info": {"react": None, "rewoo": None, "plan-execute": None, "lats": None},
+            },
+            "/quit": None,
+            "/exit": None,
+        }
 
 
-def _image_to_ascii_cv2(image_path: str, width: int = 20) -> str:
-    """Convert an image to ASCII art using OpenCV (no Pillow dependency).
+# ============================================================================
+# Display Functions
+# ============================================================================
 
-    Args:
-        image_path: Path to the PNG/JPG image.
-        width: Target character width for ASCII rendering.
+def display_banner(agent) -> None:
+    """Display startup banner with agent info."""
+    model = agent.model_name
+    strategy = agent.get_current_strategy_name()
+    strategy_info = agent.get_strategy_info(strategy)
+    desc = strategy_info['description'].split('.')[0]
 
-    Returns:
-        ASCII art string for the image.
-    """
-    if not HAS_CV2:
-        return ""
-
-    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        return ""
-
-    # Split alpha if present
-    alpha = None
-    if len(img.shape) == 3 and img.shape[2] == 4:
-        b, g, r, a = cv2.split(img)
-        gray = cv2.cvtColor(cv2.merge((b, g, r)), cv2.COLOR_BGR2GRAY)
-        alpha = a
-    elif len(img.shape) == 3:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = img
-
-    h, w = gray.shape[:2]
-    if w == 0:
-        return ""
-
-    # Account for character aspect ratio (roughly 2:1 height:width)
-    target_height = max(1, int((h / w) * width * 0.5))
-    resized = cv2.resize(gray, (width, target_height), interpolation=cv2.INTER_AREA)
-    resized_alpha = None
-    if alpha is not None:
-        resized_alpha = cv2.resize(alpha, (width, target_height), interpolation=cv2.INTER_AREA)
-
-    # Denser ramp for better detail
-    chars = " .,:;i1tfLCG08@"
-    buckets = len(chars) - 1
-
-    lines: List[str] = []
-    for y in range(resized.shape[0]):
-        row_chars = []
-        for x in range(resized.shape[1]):
-            # Transparent -> space
-            if resized_alpha is not None and int(resized_alpha[y, x]) < 16:
-                row_chars.append(" ")
-                continue
-
-            px = int(resized[y, x])
-            idx = min(buckets, (px * buckets) // 255)
-            row_chars.append(chars[idx])
-        lines.append("".join(row_chars))
-
-    return "\n".join(lines)
-
-
-def _load_png_mascot_frames(max_frames: int = 2, width: int = 20) -> List[str]:
-    """Search for PNG mascot frames at repo root and convert to ASCII.
-
-    Looks for files named like slime*.png next to the project root.
-
-    Args:
-        max_frames: Maximum number of frames to use for animation.
-        width: ASCII width per frame.
-
-    Returns:
-        List of ASCII frame strings (possibly length 0 or 1).
-    """
-    if not HAS_CV2:
-        return []
-
-    try:
-        base_dir = Path(__file__).resolve().parent.parent
-        candidates = sorted(p for p in base_dir.glob("slime*.png") if p.is_file())
-        if not candidates:
-            return []
-
-        frames: List[str] = []
-        for p in candidates[:max_frames]:
-            ascii_frame = _image_to_ascii_cv2(str(p), width=width)
-            if ascii_frame:
-                frames.append(ascii_frame)
-
-        return frames
-    except Exception:
-        return []
-
-
-def _load_ascii_text_frames(directory: str = "ascii_frames", max_frames: int = 10) -> List[str]:
-    """Load pre-generated ASCII frames from a directory (frame_*.txt)."""
-    try:
-        base_dir = Path(__file__).resolve().parent.parent / directory
-        files = sorted(base_dir.glob("frame_*.txt"))[:max_frames]
-        frames: List[str] = []
-        for fp in files:
-            frames.append(fp.read_text())
-        return frames
-    except Exception:
-        return []
-
-
-def display_startup_banner(agent, animate: bool = True, duration: float = 3.0) -> None:
-    """Display a simple text-only startup banner with agent info."""
-    # Get agent info
-    model_name = agent.model_name
-    current_strategy = agent.get_current_strategy_name()
-    strategy_info = agent.get_strategy_info(current_strategy)
-
-    # Format the text content with low-contrast keywords and default-color values
-    # Use light grey for low-contrast parts (works on dark and light themes)
-    kstyle = "color(245)"  # light grey
-    cwd = os.getcwd()
-    planning_line = f"{current_strategy.upper()} - {strategy_info['description'].split('.')[0]}"
-
-    text_content = (
-        f"[{kstyle}]agent:[/] Base Agent\n"
-        f"[{kstyle}]model:[/] {model_name}\n"
-        f"[{kstyle}]planning:[/] {planning_line}\n"
-        f"[{kstyle}]tools:[/]\n"
+    content = (
+        f"[dim]agent:[/dim] Base Agent\n"
+        f"[dim]model:[/dim] {model}\n"
+        f"[dim]planning:[/dim] {strategy.upper()} - {desc}\n"
+        f"[dim]tools:[/dim]\n"
         f"  - internet search (DuckDuckGo)\n"
         f"  - web fetch (HTTP/HTTPS)\n"
         f"  - command line (shell)\n"
-        f"[{kstyle}]directory:[/] {cwd}"
+        f"[dim]directory:[/dim] {os.getcwd()}"
     )
 
-    if HAS_RICH:
-        # Text-only panel, auto-widen to fit content and planning line
-        def _strip_rich_tags(s: str) -> str:
-            # Remove [tag] and [/tag] patterns for width calc
-            return re.sub(r"\[[^\]]*\]", "", s)
+    # Calculate panel width based on content
+    visible_text = content.replace("[dim]", "").replace("[/dim]", "")
+    max_line = max(len(line) for line in visible_text.splitlines())
+    width = min(max(max_line + 4, 70), 120)
 
-        visible = _strip_rich_tags(text_content)
-        longest = max((len(line) for line in visible.splitlines()), default=0)
-
-        term_width = shutil.get_terminal_size(fallback=(80, 24)).columns
-        # Base desired width adds padding for borders, keep it reasonably wide
-        desired = longest + 4
-        min_w = 72
-        default_cap = min(max(term_width - 4, min_w), 120)
-        cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else default_cap
-        width_target = min(max(desired, min_w), cap)
-
-        panel = Panel(text_content, border_style="color(240)", width=width_target)
-        console.print()
-        console.print(panel)
-        return
-    else:
-        # Fallback for non-rich display
-        _display_static_banner(text_content)
+    panel = Panel(content, border_style="dim", width=width)
+    console.print()
+    console.print(panel)
 
 
-def _display_static_banner(text_content: str) -> None:
-    """Display static banner without animation."""
-    if HAS_RICH:
-        width_cap = BANNER_MAX_WIDTH if BANNER_MAX_WIDTH is not None else 60
-        panel = Panel(text_content, border_style="color(240)", width=width_cap)
-        console.print()
-        console.print(panel)
-    else:
-        # Fallback for non-rich display
-        print()
-        print("=" * 60)
-        print("agent: Base Agent")
-        print(f"model: {text_content.split('model:[/] ')[1].split('[')[0].strip()}")
-        print("tools:")
-        print("  - internet search (DuckDuckGo)")
-        print("  - web fetch (HTTP/HTTPS)")
-        print("  - command line (shell)")
-        print("=" * 60)
+def stream_response(agent, prompt: str, session_id: str) -> None:
+    """Stream response from agent with markdown rendering."""
+    accumulated = ""
+    strategy = agent.get_current_strategy_name()
+    status = f"[blue][{strategy.upper()}] Thinking...[/blue]"
 
+    # Pick a spinner
+    spinner_name = "dots"
+    for name in ("squareCorners", "dots9", "dots12", "dots"):
+        if name in SPINNERS:
+            spinner_name = name
+            break
+
+    with console.status(status, spinner=spinner_name, spinner_style="dim"):
+        try:
+            for chunk in agent.stream(prompt, session_id):
+                if chunk:
+                    accumulated += chunk
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+    if accumulated.strip():
+        console.print(Markdown(accumulated))
+    console.print()
+
+
+# ============================================================================
+# File Attachment Helpers
+# ============================================================================
 
 def _max_backtick_run(s: str) -> int:
     """Find the longest consecutive run of backticks in a string."""
@@ -461,482 +265,140 @@ def _max_backtick_run(s: str) -> int:
     for ch in s:
         if ch == "`":
             run += 1
-            if run > max_run:
-                max_run = run
+            max_run = max(max_run, run)
         else:
             run = 0
     return max_run
 
 
 def _choose_fence(content: str) -> str:
-    """Choose a backtick fence longer than any backtick run in content; min 3."""
-    length = max(3, _max_backtick_run(content) + 1)
-    return "`" * length
+    """Choose a backtick fence longer than any backtick run in content."""
+    return "`" * max(3, _max_backtick_run(content) + 1)
 
 
 def _language_from_filename(path: str) -> str:
     """Detect language from file extension."""
-    name = os.path.basename(path)
-    lower = name.lower()
-    if lower == "dockerfile":
+    name = os.path.basename(path).lower()
+    if name == "dockerfile":
         return "dockerfile"
-    ext = os.path.splitext(lower)[1]
-    return {
-        ".py": "python",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".sh": "bash",
-        ".bash": "bash",
-        ".json": "json",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".md": "markdown",
-        ".txt": "text",
-        ".go": "go",
-        ".rs": "rust",
-        ".java": "java",
-        ".c": "c",
-        ".cpp": "cpp",
-        ".toml": "toml",
-        ".ini": "ini",
-    }.get(ext, "")
+    ext = os.path.splitext(name)[1]
+    langs = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript",
+        ".sh": "bash", ".bash": "bash", ".json": "json",
+        ".yaml": "yaml", ".yml": "yaml", ".md": "markdown",
+        ".txt": "text", ".go": "go", ".rs": "rust",
+        ".java": "java", ".c": "c", ".cpp": "cpp",
+        ".toml": "toml", ".ini": "ini",
+    }
+    return langs.get(ext, "")
 
 
-def _read_text_file(path: str) -> Tuple[str, int]:
-    """Read a text file and return (content, byte_length)."""
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        data = fh.read()
-    return data, len(data.encode("utf-8"))
-
-
-def _strip_quotes(s: str) -> str:
-    """Remove surrounding quotes from a string."""
-    if (s.startswith("'") and s.endswith("'")) or (s.startswith('"') and s.endswith('"')):
-        return s[1:-1]
-    return s
+def _read_file(path: str) -> str:
+    """Read a text file."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
 
 
 def _resolve_path(p: str) -> str:
-    """Resolve a path with variable expansion and user home expansion."""
-    p = _strip_quotes(p.strip())
-    p = os.path.expanduser(p)
-    p = os.path.expandvars(p)
-    return os.path.abspath(p)
+    """Resolve a path with expansion."""
+    p = p.strip().strip("'\"")
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(p)))
 
 
 def _parse_file_commands(text: str) -> Tuple[str, List[Tuple[str, str]]]:
-    """Extract /file PATH lines and return (clean_text, attachments).
-
-    Args:
-        text: Input text that may contain /file commands
-
-    Returns:
-        Tuple of (cleaned_text, list_of_attachments)
-        where each attachment is (file_path, file_content)
-    """
+    """Extract /file PATH lines and return (clean_text, attachments)."""
     attachments: List[Tuple[str, str]] = []
     kept_lines: List[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("/file"):
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("/file"):
             path = None
-            if line.startswith("/file:"):
-                path = _resolve_path(line.split(":", 1)[1])
+            if stripped.startswith("/file:"):
+                path = _resolve_path(stripped.split(":", 1)[1])
             else:
-                parts = raw_line.split(None, 1)
+                parts = line.split(None, 1)
                 if len(parts) == 2:
                     path = _resolve_path(parts[1])
+
             if path:
                 try:
-                    content, _ = _read_text_file(path)
+                    content = _read_file(path)
                     attachments.append((path, content))
+                    continue
                 except OSError as e:
-                    kept_lines.append(raw_line)
-                    kept_lines.append(f"[client] Failed to read {path}: {e}")
-                continue
-        kept_lines.append(raw_line)
-    clean_text = "\n".join(kept_lines)
-    return clean_text, attachments
+                    kept_lines.append(line)
+                    kept_lines.append(f"[Error reading {path}: {e}]")
+                    continue
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines), attachments
 
 
 def _build_message(prompt: str, attachments: List[Tuple[str, str]]) -> str:
     """Build final message including file attachments in code blocks."""
     if not attachments:
         return prompt
+
     parts = [prompt, ""]
     for path, content in attachments:
         fence = _choose_fence(content)
         lang = _language_from_filename(path)
-        header = f"[FILE: {path}]"
         if not content.endswith("\n"):
-            content = content + "\n"
+            content += "\n"
+
         if lang:
-            block = f"{header}\n{fence}{lang}\n{content}{fence}"
+            block = f"[FILE: {path}]\n{fence}{lang}\n{content}{fence}"
         else:
-            block = f"{header}\n{fence}\n{content}{fence}"
+            block = f"[FILE: {path}]\n{fence}\n{content}{fence}"
         parts.append(block)
+
     return "\n\n".join(parts)
 
 
-def handle_reasoning_command(agent, args: List[str]) -> bool:
-    """
-    Handle /reasoning commands.
+# ============================================================================
+# Interactive TUI
+# ============================================================================
 
-    Args:
-        agent: The agent instance
-        args: Command arguments (e.g., ['list'], ['switch', 'rewoo'])
+def run_interactive(agent, session_id: str = "main_session") -> None:
+    """Run interactive TUI with prompt_toolkit."""
+    dispatcher = CommandDispatcher(agent)
 
-    Returns:
-        True if command was handled, False otherwise
-    """
-    if not args:
-        print("[client] Usage: /reasoning <list|current|switch|info>")
-        return True
+    # Display banner and help
+    display_banner(agent)
+    dispatcher._handle_help("", [])
 
-    subcommand = args[0].lower()
-
-    if subcommand == "list":
-        # List all available strategies
-        strategies = agent.list_strategies()
-
-        if HAS_RICH:
-            console.print("\n[bold cyan]Available Reasoning Strategies:[/bold cyan]\n")
-            for strategy in strategies:
-                current_marker = "[green]✓[/green] " if strategy["is_current"] else "  "
-                console.print(f"{current_marker}[bold]{strategy['name']}[/bold]")
-                console.print(f"  {strategy['description']}\n")
-        else:
-            print("\nAvailable Reasoning Strategies:\n")
-            for strategy in strategies:
-                current_marker = "✓ " if strategy["is_current"] else "  "
-                print(f"{current_marker}{strategy['name']}")
-                print(f"  {strategy['description']}\n")
-
-        return True
-
-    elif subcommand == "current":
-        # Show current strategy
-        current = agent.get_current_strategy_name()
-        info = agent.get_strategy_info()
-
-        if HAS_RICH:
-            console.print(f"\n[bold cyan]Current Strategy:[/bold cyan] [green]{current}[/green]")
-            console.print(f"[dim]{info['description']}[/dim]\n")
-        else:
-            print(f"\nCurrent Strategy: {current}")
-            print(f"{info['description']}\n")
-
-        return True
-
-    elif subcommand == "switch":
-        # Switch to a different strategy
-        if len(args) < 2:
-            print("[client] Usage: /reasoning switch <strategy_name>")
-            return True
-
-        new_strategy = args[1].lower()
-
-        try:
-            agent.switch_reasoning_strategy(new_strategy)
-
-            if HAS_RICH:
-                console.print(f"\n[green]✓[/green] Switched to [bold]{new_strategy}[/bold] strategy\n")
-            else:
-                print(f"\n✓ Switched to {new_strategy} strategy\n")
-
-            # Re-display the text-only banner
-            display_startup_banner(agent, animate=False)
-
-        except KeyError as e:
-            if HAS_RICH:
-                console.print(f"\n[red]Error:[/red] {e}\n")
-            else:
-                print(f"\nError: {e}\n")
-
-        return True
-
-    elif subcommand == "info":
-        # Show detailed info about a strategy
-        strategy_name = args[1].lower() if len(args) > 1 else None
-
-        try:
-            info = agent.get_strategy_info(strategy_name)
-
-            if HAS_RICH:
-                console.print(f"\n[bold cyan]Strategy:[/bold cyan] [bold]{info['name']}[/bold]")
-                if info['is_current']:
-                    console.print("[green]✓ Currently active[/green]")
-                console.print(f"\n[bold]Description:[/bold]\n{info['description']}")
-                console.print(f"\n[bold]Streaming Support:[/bold] {'Yes' if info['supports_streaming'] else 'No'}")
-
-                if info['config']:
-                    console.print("\n[bold]Configuration:[/bold]")
-                    for key, value in info['config'].items():
-                        console.print(f"  {key}: {value}")
-
-                console.print()
-            else:
-                print(f"\nStrategy: {info['name']}")
-                if info['is_current']:
-                    print("✓ Currently active")
-                print(f"\nDescription:\n{info['description']}")
-                print(f"\nStreaming Support: {'Yes' if info['supports_streaming'] else 'No'}")
-
-                if info['config']:
-                    print("\nConfiguration:")
-                    for key, value in info['config'].items():
-                        print(f"  {key}: {value}")
-
-                print()
-
-        except KeyError as e:
-            if HAS_RICH:
-                console.print(f"\n[red]Error:[/red] {e}\n")
-            else:
-                print(f"\nError: {e}\n")
-
-        return True
-
-    else:
-        print(f"[client] Unknown reasoning subcommand: {subcommand}")
-        print("[client] Usage: /reasoning <list|current|switch|info>")
-        return True
-
-
-def stream_response(agent, prompt: str, session_id: str) -> None:
-    """Stream response from agent and render with rich markdown."""
-    accumulated = ""
-
-    # Show current reasoning strategy
-    current_strategy = agent.get_current_strategy_name()
-    strategy_label = f"[{current_strategy.upper()}]"
-
-    status_msg = f"[blue]{strategy_label} Thinking..." if HAS_RICH else f"{strategy_label} Thinking..."
-
-    def _pick_spinner_name() -> str:
-        if not HAS_RICH:
-            return "dots"
-        for name in ("squareCorners", "dots9", "dots12", "dots"):
-            try:
-                if name in SPINNERS:
-                    return name
-            except Exception:
-                break
-        return "dots"
-
-    if HAS_RICH:
-        with console.status(status_msg, spinner=_pick_spinner_name(), spinner_style="color(245)"):
-            try:
-                for chunk in agent.stream(prompt, session_id):
-                    if chunk:
-                        accumulated += chunk
-            except Exception as e:
-                if HAS_RICH:
-                    console.print(f"[red]Error: {e}[/red]")
-                else:
-                    print(f"Error: {e}")
-                return
-    else:
-        try:
-            for chunk in agent.stream(prompt, session_id):
-                if chunk:
-                    accumulated += chunk
-        except Exception as e:
-            print(f"Error: {e}")
-            return
-
-    # Render accumulated response
-    if accumulated.strip():
-        if HAS_RICH:
-            md = Markdown(accumulated)
-            console.print(md)
-        else:
-            print(accumulated)
-
-    if HAS_RICH:
-        console.print()  # Extra newline for spacing
-    else:
-        print()
-
-
-def _run_tui(agent, session_id: str) -> None:
-    """Run a prompt_toolkit TUI with multiline input and file attachment support."""
+    # Setup completer
     try:
-        from prompt_toolkit.shortcuts import PromptSession
-        from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.styles import Style
-        from prompt_toolkit.completion import NestedCompleter, PathCompleter, FuzzyCompleter
-        from prompt_toolkit.patch_stdout import patch_stdout
-        from prompt_toolkit.filters import Condition
-        from prompt_toolkit.application.current import get_app
-    except ImportError:
-        print("prompt_toolkit not installed. Run: pip install prompt_toolkit")
-        _run_simple_repl(agent, session_id)
-        return
-
-    # Display simple text-only startup banner
-    display_startup_banner(agent, animate=False)
-
-    def _print_commands_hint() -> None:
-        try:
-            if HAS_RICH:
-                console.print()
-                console.print("[color(245)]/file — attach a local file[/color(245)]")
-                console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
-                console.print("[color(245)]/help — show available commands[/color(245)]")
-                console.print("[color(245)]/quit — exit application[/color(245)]")
-                console.print()
-            else:
-                print()
-                print("/file — attach a local file")
-                print("/reasoning — list or switch strategy")
-                print("/help — show available commands")
-                print("/quit — exit application")
-                print()
-        except Exception:
-            pass
-
-    _print_commands_hint()
-
-    # Build completer
-    try:
-        base_completer = NestedCompleter.from_nested_dict({
-            "/file": PathCompleter(expanduser=True, only_directories=False),
-            "/help": None,
-            "/reasoning": {
-                "list": None,
-                "current": None,
-                "switch": {
-                    "react": None,
-                    "rewoo": None,
-                    "plan-execute": None,
-                    "lats": None,
-                },
-                "info": {
-                    "react": None,
-                    "rewoo": None,
-                    "plan-execute": None,
-                    "lats": None,
-                },
-            },
-            "/quit": None,
-        })
-        completer = FuzzyCompleter(base_completer)
+        completer = FuzzyCompleter(NestedCompleter.from_nested_dict(dispatcher.get_completions()))
     except AttributeError:
-        try:
-            base_completer = NestedCompleter({
-                "/file": PathCompleter(expanduser=True, only_directories=False),
-                "/help": None,
-                "/reasoning": {
-                    "list": None,
-                    "current": None,
-                    "switch": {
-                        "react": None,
-                        "rewoo": None,
-                        "plan-execute": None,
-                        "lats": None,
-                    },
-                    "info": {
-                        "react": None,
-                        "rewoo": None,
-                        "plan-execute": None,
-                        "lats": None,
-                    },
-                },
-                "/quit": None,
-            })
-            completer = FuzzyCompleter(base_completer)
-        except Exception:
-            from prompt_toolkit.completion import WordCompleter
-            completer = WordCompleter(["/file", "/reasoning", "/help", "/quit"])
+        completer = FuzzyCompleter(NestedCompleter(dispatcher.get_completions()))
 
-    # Style for the left bar
-    # Use prompt_toolkit-supported color syntax (hex), not Rich-style 'color(n)'
-    style = Style.from_dict({
-        "blockquote.prefix": "fg:#888888",
-        "rule": "fg:#888888",
-    })
+    # Style
+    style = Style.from_dict({"prompt": "fg:#888888"})
+    prompt_tokens = [("class:prompt", "▌ ")]
 
-    bar_tokens = [("class:blockquote.prefix", "▌ ")]
-
-    def prompt_continuation(width: int, line_number: int, is_soft_wrap: bool):
-        return bar_tokens
-
-    # Enable terminal key protocols
-    def _term_write(seq: str) -> None:
-        try:
-            sys.stdout.write(seq)
-            sys.stdout.flush()
-        except Exception:
-            pass
-
-    def _enable_modified_keys() -> None:
-        _term_write("\x1b[>1u")      # Enable CSI u key reporting
-        _term_write("\x1b[>4;2m")    # Enable modifyOtherKeys level 2
-
-    def _disable_modified_keys() -> None:
-        _term_write("\x1b[>0u")      # Disable CSI u key reporting
-        _term_write("\x1b[>4;0m")    # Disable modifyOtherKeys
-
-    _enable_modified_keys()
-
-    def _recolor_last_prompt_submission(submitted: str) -> None:
-        """Best-effort recolor of the just-submitted prompt in-place to low-contrast.
-
-        We approximate the number of terminal rows consumed (accounting for simple wrapping)
-        and move the cursor up to rewrite those lines in grey. This avoids echoing a duplicate.
-        """
-        try:
-            if not HAS_RICH:
-                return
-            if not submitted:
-                return
-            prefix = "▌ "
-            width = max(10, shutil.get_terminal_size(fallback=(80, 20)).columns)
-            logical_lines = submitted.splitlines() or [""]
-            # Estimate how many terminal rows the submission used
-            rows = 0
-            for ln in logical_lines:
-                length = len(prefix) + len(ln)
-                rows += max(1, math.ceil(length / width))
-            # Move cursor up and rewrite
-            sys.stdout.write(f"\x1b[{rows}A")
-            for ln in logical_lines:
-                sys.stdout.write("\x1b[2K\r")  # clear line
-                console.print(f"[color(245)]{prefix}{ln}[/color(245)]", end="")
-                sys.stdout.write("\n")
-            sys.stdout.flush()
-        except Exception:
-            # If anything goes wrong, quietly skip recolor
-            pass
-
-    # Key bindings: Enter submits; Shift/Ctrl/Alt-Enter insert newline; Ctrl-S submits
+    # Key bindings
     kb = KeyBindings()
-    # Detect when the completion menu is open
     menu_visible = Condition(lambda: get_app().current_buffer.complete_state is not None)
+
     @kb.add("enter", filter=menu_visible)
     def _(event):
-        # If the completion menu is visible, Enter should not submit.
-        # Apply the highlighted completion (select first if none yet).
+        """Apply completion on Enter when menu is visible."""
         b = event.current_buffer
-        st = b.complete_state
-        if st is not None:
-            if st.current_completion is None:
-                # Ensure something is selected before applying.
+        if b.complete_state:
+            if b.complete_state.current_completion is None:
                 b.complete_next()
-                st = b.complete_state
-            if st and st.current_completion is not None:
-                b.apply_completion(st.current_completion)
+            if b.complete_state and b.complete_state.current_completion:
+                b.apply_completion(b.complete_state.current_completion)
 
     @kb.add("enter", filter=~menu_visible)
     def _(event):
-        # Only submit when no completion dropdown is visible.
-        buf = event.app.current_buffer
-        if buf.document.text.strip() == "":
-            return
-        buf.validate_and_handle()
+        """Submit on Enter when menu is not visible."""
+        if event.app.current_buffer.document.text.strip():
+            event.app.current_buffer.validate_and_handle()
 
-    # Navigate completion menu with Up/Down and Tab / Shift-Tab
     @kb.add("down", filter=menu_visible)
     def _(event):
         event.current_buffer.complete_next()
@@ -945,7 +407,6 @@ def _run_tui(agent, session_id: str) -> None:
     def _(event):
         event.current_buffer.complete_previous()
 
-    # Also support Tab / Shift-Tab cycling
     @kb.add("tab")
     def _(event):
         event.current_buffer.complete_next()
@@ -954,17 +415,10 @@ def _run_tui(agent, session_id: str) -> None:
     def _(event):
         event.current_buffer.complete_previous()
 
-    for key_name in ("s-enter", "s-return"):
+    # Shift/Ctrl/Alt-Enter for newlines
+    for key in ("s-enter", "c-enter", "a-enter", "c-j"):
         try:
-            @kb.add(key_name)
-            def _(event):
-                event.current_buffer.insert_text("\n")
-        except Exception:
-            pass
-
-    for key_name in ("a-enter", "c-enter", "a-return", "c-return"):
-        try:
-            @kb.add(key_name)
+            @kb.add(key)
             def _(event):
                 event.current_buffer.insert_text("\n")
         except Exception:
@@ -972,12 +426,7 @@ def _run_tui(agent, session_id: str) -> None:
 
     @kb.add("c-s", filter=~menu_visible)
     def _(event):
-        # Submit only when no completion dropdown is visible.
         event.app.current_buffer.validate_and_handle()
-
-    @kb.add("c-j")
-    def _(event):
-        event.current_buffer.insert_text("\n")
 
     @kb.add("c-q")
     def _(event):
@@ -987,152 +436,57 @@ def _run_tui(agent, session_id: str) -> None:
     def _(event):
         event.app.exit(exception=KeyboardInterrupt)
 
-    session = PromptSession(style=style, completer=completer)
+    session = PromptSession(
+        style=style,
+        completer=completer,
+        key_bindings=kb,
+    )
 
+    # REPL loop
     try:
         while True:
             with patch_stdout():
                 try:
                     text = session.prompt(
-                        bar_tokens,
+                        prompt_tokens,
                         multiline=True,
-                        prompt_continuation=prompt_continuation,
+                        prompt_continuation=lambda w, l, s: prompt_tokens,
                         complete_while_typing=True,
                         reserve_space_for_menu=8,
-                        complete_in_thread=True,
-                        key_bindings=kb,
                     )
                 except EOFError:
                     break
 
-            if text is None:
+            if not text:
+                continue
+
+            # Dispatch command
+            result = dispatcher.dispatch(text)
+
+            if result.should_exit:
                 break
-            if text.strip() in {"/quit", "/exit"}:
-                break
 
-            # Ignore blank submits
-            if text.strip() == "":
+            if result.handled and not result.should_process:
                 continue
 
-            # Handle /enter command
-            ts = text.strip()
-            # Remove legacy /enter handling
+            # Send to agent
+            if result.should_process:
+                width = shutil.get_terminal_size(fallback=(80, 20)).columns
+                console.print("[dim]" + "-" * min(width, 120) + "[/dim]")
 
-            # Fast-path: /help (no separator or LLM)
-            if ts.startswith("/help") or ts == "/?":
-                _recolor_last_prompt_submission(text)
-                _print_commands_hint()
-                continue
+                clean, attachments = _parse_file_commands(text)
+                message = _build_message(clean, attachments)
+                stream_response(agent, message, session_id)
 
-            # Handle /reasoning command
-            if ts.startswith("/reasoning"):
-                _recolor_last_prompt_submission(text)
-                parts = ts.split()[1:]  # Get all parts after /reasoning
-                handle_reasoning_command(agent, parts)
-                continue
-
-            # Recolor the just-submitted text in-place to low-contrast
-            _recolor_last_prompt_submission(text)
-
-            # Draw separator before response
-            width = shutil.get_terminal_size(fallback=(80, 20)).columns
-            print("-" * max(20, min(120, width)))
-
-            # Parse file attachments and build message
-            clean, attachments = _parse_file_commands(text)
-            message = _build_message(clean, attachments)
-
-            # Stream response
-            stream_response(agent, message, session_id)
-
-            # Draw separator after response
-            width = shutil.get_terminal_size(fallback=(80, 20)).columns
-            print("-" * max(20, min(120, width)))
+                console.print("[dim]" + "-" * min(width, 120) + "[/dim]")
 
     except KeyboardInterrupt:
-        raise
-    finally:
-        _disable_modified_keys()
+        pass
 
 
-def _run_simple_repl(agent, session_id: str) -> None:
-    """Fallback simple REPL without prompt_toolkit."""
-    # Display startup banner
-    display_startup_banner(agent)
-
-    print("\nType 'exit', 'quit', 'q' to quit.")
-    if HAS_RICH:
-        console.print("[color(245)]/file — attach a local file[/color(245)]")
-        console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
-        console.print("[color(245)]/help — show available commands[/color(245)]")
-        console.print("[color(245)]/quit — exit application[/color(245)]")
-    else:
-        print("/file — attach a local file")
-        print("/reasoning — list or switch strategy")
-        print("/help — show available commands")
-        print("/quit — exit application")
-    print("-" * 60)
-    print()
-
-    while True:
-        try:
-            text = input("You: ").strip()
-        except EOFError:
-            break
-        except KeyboardInterrupt:
-            print("\n\nGoodbye!")
-            break
-
-        if not text:
-            continue
-
-        if text.lower() in {"/quit", "/exit", "exit", "quit", "q"}:
-            print("\nGoodbye!")
-            break
-
-        # /enter removed
-
-        # Handle /help (no LLM)
-        if text.startswith("/help") or text == "/?":
-            print()
-            if HAS_RICH:
-                console.print("[color(245)]/file — attach a local file[/color(245)]")
-                console.print("[color(245)]/reasoning — list or switch strategy[/color(245)]")
-                console.print("[color(245)]/help — show available commands[/color(245)]")
-                console.print("[color(245)]/quit — exit application[/color(245)]")
-            else:
-                print("/file — attach a local file")
-                print("/reasoning — list or switch strategy")
-                print("/help — show available commands")
-                print("/quit — exit application")
-            print()
-            continue
-
-        # Handle /reasoning command
-        if text.startswith("/reasoning"):
-            parts = text.split()[1:]  # Get all parts after /reasoning
-            handle_reasoning_command(agent, parts)
-            continue
-
-        # Parse file attachments
-        clean, attachments = _parse_file_commands(text)
-        message = _build_message(clean, attachments)
-
-        # Stream response
-        stream_response(agent, message, session_id)
-
-
-def run_interactive(agent, session_id: str = "main_session") -> None:
-    """Run interactive CLI with TUI or simple REPL fallback."""
-    try:
-        _run_tui(agent, session_id)
-    except Exception as e:
-        print(f"TUI error: {e}")
-        print("Falling back to simple REPL...\n")
-        _run_simple_repl(agent, session_id)
-    except KeyboardInterrupt:
-        print("\n\nGoodbye!")
-
+# ============================================================================
+# Entry Points
+# ============================================================================
 
 def run_once(agent, prompt: str, session_id: str = "main_session") -> None:
     """Run a single query and exit."""
@@ -1140,26 +494,14 @@ def run_once(agent, prompt: str, session_id: str = "main_session") -> None:
 
 
 def run(agent, args: List[str] = None) -> None:
-    """Main entry point for CLI.
-
-    Args:
-        agent: The Agent instance to use
-        args: Command line arguments (default: sys.argv[1:])
-    """
+    """Main entry point for CLI."""
     if args is None:
         args = sys.argv[1:]
 
     try:
         if args:
-            # One-shot mode: process all arguments as a single query
-            prompt = " ".join(args)
-            run_once(agent, prompt)
+            run_once(agent, " ".join(args))
         else:
-            # Interactive mode
             run_interactive(agent)
     except KeyboardInterrupt:
-        # Exit with code 130 to indicate SIGINT
-        try:
-            sys.exit(130)
-        except Exception:
-            pass
+        sys.exit(130)
