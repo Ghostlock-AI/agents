@@ -21,7 +21,7 @@ class StrategyRegistry:
     def __init__(self):
         """Initialize the registry with default strategies."""
         self._strategies: Dict[str, ReasoningStrategy] = {}
-        self._current_strategy_name: str = "react"
+        self._current_strategy_name: str = "plan-execute"
 
         # Register default strategies
         self._register_defaults()

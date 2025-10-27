@@ -208,3 +208,10 @@ __marimo__/
 
 # Mac specific
 **/.DS_Store
+
+# agent memories file
+**/.memories
+
+
+
+
