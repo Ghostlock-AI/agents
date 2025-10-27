@@ -13,6 +13,7 @@ from langgraph.graph.message import add_messages
 from tools import get_tools
 from reasoning.tool_context import build_tool_guide
 from reasoning import get_global_registry, create_react_graph
+from workflow_system import Workflow, WorkflowBuilder, WorkflowTemplates
 
 
 class AgentState(TypedDict):
@@ -34,12 +35,24 @@ class Agent:
         temperature: float = 0.7,
         system_prompt_path: str = "system_prompt.txt",
         tools: list = None,
-        reasoning_strategy: str = "react"
+        reasoning_strategy: str = "react",
+        mode: str = "agent"  # "agent" or "workflow"
     ):
-        """Initialize the agent."""
+        """Initialize the agent.
+
+        Args:
+            model_name: OpenAI model name (default: gpt-4o-mini)
+            temperature: LLM temperature (0.0-1.0)
+            system_prompt_path: Path to system prompt file
+            tools: List of tools available to agent
+            reasoning_strategy: For agent mode: 'react', 'rewoo', 'plan-execute', 'lats'
+            mode: "agent" for autonomous reasoning, "workflow" for sequential pipelines
+        """
         self.model_name = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.temperature = temperature
         self.system_prompt = self._load_system_prompt(system_prompt_path)
+        self.mode = mode
+        self.current_workflow = None
 
         # Initialize tools after env is loaded
         self.tools = tools or get_tools()
@@ -55,15 +68,18 @@ class Agent:
         # This tells the LLM about available tools and their descriptions
         self.llm_with_tools = self.llm.bind_tools(self.tools)
 
-        # Initialize strategy registry
+        # Initialize strategy registry (for agent mode)
         self.strategy_registry = get_global_registry()
 
-        # Set initial reasoning strategy
+        # Set initial reasoning strategy (only used in agent mode)
         if reasoning_strategy:
             self.strategy_registry.set_current_strategy(reasoning_strategy)
 
-        # Build the reasoning graph using current strategy
-        self.graph = self._build_graph()
+        # Build the reasoning graph using current strategy (only for agent mode)
+        if self.mode == "agent":
+            self.graph = self._build_graph()
+        else:
+            self.graph = None
 
     def _load_system_prompt(self, path: str) -> str:
         """Load system prompt from file."""
@@ -115,6 +131,60 @@ class Agent:
             strategy_name = self.get_current_strategy_name()
         return self.strategy_registry.get_strategy_info(strategy_name)
 
+    # Workflow mode methods
+    def set_workflow(self, workflow: Workflow):
+        """
+        Set a workflow for workflow mode.
+
+        Args:
+            workflow: Workflow instance to use
+
+        Example:
+            workflow = WorkflowBuilder("my_workflow")
+                .add_step("research", "Gather information")
+                .add_step("analyze", "Analyze findings")
+                .build()
+            agent.set_workflow(workflow)
+        """
+        if self.mode != "workflow":
+            raise ValueError("Agent must be in workflow mode to set a workflow. Initialize with mode='workflow'")
+        self.current_workflow = workflow
+
+    def load_workflow_template(self, template_name: str):
+        """
+        Load a pre-built workflow template.
+
+        Args:
+            template_name: Name of template ('research_and_summarize', 'code_review')
+
+        Example:
+            agent = Agent(mode='workflow')
+            agent.load_workflow_template('research_and_summarize')
+        """
+        if self.mode != "workflow":
+            raise ValueError("Agent must be in workflow mode to load templates. Initialize with mode='workflow'")
+
+        templates = {
+            'research_and_summarize': WorkflowTemplates.research_and_summarize,
+            'code_review': WorkflowTemplates.code_review,
+        }
+
+        if template_name not in templates:
+            raise ValueError(f"Unknown template: {template_name}. Available: {list(templates.keys())}")
+
+        self.current_workflow = templates[template_name]()
+
+    def get_workflow_trace(self) -> list:
+        """
+        Get the execution trace from the last workflow run.
+
+        Returns:
+            List of step execution details
+        """
+        if not self.current_workflow:
+            return []
+        return self.current_workflow.get_execution_trace()
+
     def stream(self, user_input: str, thread_id: str = "default", show_trace: bool = False):
         """
         Stream response for user input.
@@ -126,6 +196,41 @@ class Agent:
         """
         from langchain_core.messages import ToolMessage
 
+        # Handle workflow mode
+        if self.mode == "workflow":
+            if not self.current_workflow:
+                yield "[ERROR: No workflow set. Use set_workflow() or load_workflow_template()]\n"
+                return
+
+            yield f"[WORKFLOW: {self.current_workflow.name}]\n"
+
+            # Show steps if trace enabled
+            if show_trace:
+                yield f"[STEPS: {len(self.current_workflow.steps)}]\n"
+                for i, step in enumerate(self.current_workflow.steps):
+                    yield f"  Step {i+1}: {step.name} - {step.instruction[:50]}...\n"
+
+            # Execute workflow
+            try:
+                # Show step execution in real-time
+                for i, step in enumerate(self.current_workflow.steps):
+                    yield f"[STEP {i+1}/{len(self.current_workflow.steps)}: {step.name}]\n"
+
+                # Execute and get result
+                result = self.current_workflow.execute(user_input, self.llm, self.tools)
+                yield result
+
+                # Show trace if requested
+                if show_trace:
+                    yield "\n[WORKFLOW TRACE]\n"
+                    for log_entry in self.current_workflow.get_execution_trace():
+                        yield f"  {log_entry.get('step')}: {log_entry.get('name')}\n"
+
+            except Exception as e:
+                yield f"[WORKFLOW ERROR: {e}]\n"
+            return
+
+        # Handle agent mode (existing logic)
         # Prepend system message to the user input
         input_state = {
             "messages": [
