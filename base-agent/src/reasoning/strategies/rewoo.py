@@ -81,11 +81,13 @@ JSON schema (example):
   ]
 }}
 
-Rules:
-- Use integers for step ids starting at 1.
-- Use depends_on to express dependencies by id.
-- Ensure arguments match the tool signatures.
-- Do NOT include any text outside JSON.
+CRITICAL PLANNING RULES:
+- For current date/time: Use shell_exec with "date" command
+- For research/current events: Use ddgs_search (optionally followed by web_fetch)
+- Use integers for step ids starting at 1
+- Use depends_on to express dependencies by id
+- Keep plans simple - don't create redundant steps
+- Do NOT include any text outside JSON
 """,
             ),
             ("human", "{query}")
@@ -215,8 +217,13 @@ Rules:
                 lines.append(f"- [{r.get('tool')}] step {r.get('step_id')}: {r.get('content')}")
 
             synthesis_prompt = (
-                "Based on the following tool execution results, provide a concise, complete answer to the original query.\n\n"
+                "CRITICAL: You must synthesize your answer using ONLY the tool execution results below. "
+                "Do NOT use any information from your training data. "
+                "Do NOT modify dates, times, or facts from the tool outputs. "
+                "Simply present the information from the tools in a clear, concise way.\n\n"
+                "Tool execution results:\n"
                 + "\n".join(lines)
+                + "\n\nProvide a direct answer based ONLY on the above results."
             )
 
             # Use LLM without tools for synthesis
