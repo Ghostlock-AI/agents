@@ -32,7 +32,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
-from .base import ReasoningStrategy
+from reasoning.base import ReasoningStrategy
 from reasoning.tool_context import build_tool_guide
 
 

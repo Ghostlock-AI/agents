@@ -35,7 +35,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
-from .base import ReasoningStrategy
+from reasoning.base import ReasoningStrategy
 
 
 class LATSStrategy(ReasoningStrategy):

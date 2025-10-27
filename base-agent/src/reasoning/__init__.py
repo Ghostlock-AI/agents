@@ -1,10 +1,14 @@
 """
-Reasoning module - Advanced reasoning strategies for the agent.
+Reasoning module - Workflows and Agents for intelligent task execution.
 
-This module provides multiple reasoning strategies:
+This module distinguishes between two fundamental patterns:
+
+WORKFLOWS: Predefined code paths with LLM and tool orchestration
+- ReWOO: Plans all steps upfront, executes in parallel
+- Plan-Execute: Adaptive planning with replanning capability
+
+AGENTS: LLMs dynamically control their own processes and tool usage
 - ReAct: Iterative reasoning with tool use
-- ReWOO: Plan all steps upfront, execute in parallel
-- Plan-and-Execute: Adaptive planning with sequential execution
 - LATS: Tree search with self-reflection
 
 Usage:
@@ -21,12 +25,18 @@ from .strategy_registry import (
     reset_global_registry,
 )
 
-from .strategies import (
-    ReasoningStrategy,
+from .base import ReasoningStrategy
+
+# Import agents
+from .agents import (
     ReActStrategy,
+    LATSStrategy,
+)
+
+# Import workflows
+from .workflows import (
     ReWOOStrategy,
     PlanExecuteStrategy,
-    LATSStrategy,
 )
 
 # Legacy support - keep the old create_react_graph function for backward compatibility

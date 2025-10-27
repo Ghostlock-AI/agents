@@ -6,13 +6,9 @@ Provides a centralized place to register and retrieve strategies.
 """
 
 from typing import Dict, List, Optional
-from .strategies import (
-    ReasoningStrategy,
-    ReActStrategy,
-    ReWOOStrategy,
-    PlanExecuteStrategy,
-    LATSStrategy,
-)
+from .base import ReasoningStrategy
+from .agents import ReActStrategy, LATSStrategy
+from .workflows import ReWOOStrategy, PlanExecuteStrategy
 
 
 class StrategyRegistry:
