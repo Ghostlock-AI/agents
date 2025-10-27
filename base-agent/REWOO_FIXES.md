@@ -160,6 +160,67 @@ Today is Monday, October 27, 2025.
 3. **Parallel queries** (independent steps): "Get weather in SF and NYC"
 4. **Multiple queries in session** to verify no cross-contamination
 
+## Additional Issues and Fixes (After Initial Testing)
+
+### Issue 3: Synthesizer Changing Tool Results
+**Symptom:** ReWOO executed tools correctly but synthesizer changed the results.
+
+**Example:**
+```
+Tool output: "Monday, October 27, 2025"
+Synthesizer output: "Today is Monday, October 23, 2023" ❌
+```
+
+**Root Cause:** The synthesis prompt didn't emphasize using ONLY tool results. The synthesizer was mixing tool outputs with training data.
+
+**Fix:** Enhanced synthesis prompt with explicit instructions (lines 217-225):
+```python
+synthesis_prompt = (
+    "CRITICAL: You must synthesize your answer using ONLY the tool execution results below. "
+    "Do NOT use any information from your training data. "
+    "Do NOT modify dates, times, or facts from the tool outputs. "
+    "Simply present the information from the tools in a clear, concise way.\n\n"
+    "Tool execution results:\n"
+    + "\n".join(lines)
+    + "\n\nProvide a direct answer based ONLY on the above results."
+)
+```
+
+### Issue 4: Planner Creating Overly Complex Plans
+**Symptom:** Planner created redundant 4-step plans for simple queries like "What time is it?"
+
+**Root Cause:** Planning prompt examples were too detailed and confusing the LLM.
+
+**Fix:** Simplified planning guidance (lines 84-90):
+- Removed specific examples that were causing confusion
+- Added "Keep plans simple - don't create redundant steps"
+- Clearer rules: "For current date/time: Use shell_exec with date command"
+
+## Final Test Results
+
+**Before All Fixes:**
+```
+Query: "What day is today?"
+Output: "Today is Monday, October 23, 2023" ❌ (wrong date from training data)
+```
+
+**After All Fixes:**
+```
+Query: "What day is today?"
+Output: "Today is Monday, October 27, 2025" ✅ (correct current date)
+
+Query: "What time is it?"
+Output: "The current time is 16:11:25 GMT on October 27, 2025" ✅ (correct time)
+```
+
+## Summary of All Fixes
+
+1. ✅ **Routing Logic** - Check actual tool_calls instead of plan state
+2. ✅ **Message Filtering** - Remove AIMessages with unresolved tool_calls before synthesis
+3. ✅ **Tool-Free LLMs** - Use `bind(tools=[])` for planner and synthesizer
+4. ✅ **Synthesis Prompt** - Emphasize using ONLY tool results, no training data
+5. ✅ **Planning Guidance** - Simplified rules to prevent overly complex plans
+
 ## Remaining Considerations
 
 1. **Error Handling:** If a tool fails, the workflow should still synthesize with available results
@@ -171,5 +232,7 @@ Today is Monday, October 27, 2025.
 
 - `src/reasoning/strategies/rewoo.py`:
   - Line 125: Added `llm_for_planning` without tools
+  - Lines 84-90: Simplified planning rules to prevent complex plans
+  - Lines 217-225: Enhanced synthesis prompt to prevent hallucination
   - Line 233: Rewrote `after_plan_route` to check actual tool_calls
   - Lines 199-222: Enhanced `synthesizer_node` with message filtering and tool-free LLM
