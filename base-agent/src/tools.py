@@ -24,16 +24,34 @@ def get_tools():
 def ddgs_search(query: str, max_results: int = 5, return_json: bool = False) -> str:
     """Search the web using DuckDuckGo for current information, documentation, or answers to questions.
 
-    Use this when you need up-to-date information that isn't in your training data,
-    or when the user explicitly asks you to search for something.
+    WHEN TO USE:
+    - Finding current events, news, or recent information
+    - Looking up documentation or technical resources
+    - Researching topics not in training data (post-2023)
+    - Verifying facts or gathering multiple perspectives
+
+    BEST PRACTICES:
+    - Use specific, focused queries (e.g., "Python asyncio tutorial 2024")
+    - Follow up with web_fetch to get full content from top results
+    - For research tasks, use max_results=3-5 then fetch top URLs
 
     Args:
-        query: The search query string
-        max_results: Maximum number of results to return (default: 5)
-        return_json: If True, return a compact JSON array of {title, url, snippet}.
+        query: Specific search query (e.g., "latest Python release notes")
+        max_results: Number of results to return (default: 5, max: 10)
+        return_json: If True, returns structured JSON for programmatic parsing
 
     Returns:
-        Formatted search results with titles, snippets, and links
+        Formatted search results with titles, URLs, and snippets
+
+    Examples:
+        ddgs_search("React hooks documentation")
+        ddgs_search("weather San Francisco today", max_results=3)
+        ddgs_search("AI news 2024", return_json=True)
+
+    AVOID:
+    - Vague queries like "stuff" or "things"
+    - Queries better answered with date/time commands
+    - Searching for information you already have
     """
     try:
         ddgs = DDGS()
@@ -68,17 +86,42 @@ def ddgs_search(query: str, max_results: int = 5, return_json: bool = False) -> 
 
 @tool
 def web_fetch(url: str, timeout: int = 10) -> str:
-    """Fetch and extract the text content from a specific webpage.
+    """Fetch and extract text content from a specific webpage.
 
-    Use this to retrieve the full content of a URL for detailed information.
-    Works best for text-based content (docs, articles, etc).
+    WHEN TO USE:
+    - After ddgs_search to get full content from promising URLs
+    - Reading documentation, articles, or blog posts
+    - Extracting detailed information from a known URL
+    - Verifying information from primary sources
+
+    BEST PRACTICES:
+    - Use after search to fetch 1-3 most relevant URLs
+    - Works best with text-heavy pages (docs, articles, blogs)
+    - Automatically handles http/https schemes
+    - Content is truncated at 5000 chars for manageability
 
     Args:
-        url: The URL to fetch
-        timeout: Request timeout in seconds (default: 10)
+        url: Full URL or domain (e.g., "https://example.com/page" or "example.com/page")
+        timeout: Max seconds to wait for response (default: 10)
 
     Returns:
-        The extracted text content from the webpage
+        Extracted text content (HTML tags removed, whitespace normalized)
+
+    Examples:
+        web_fetch("https://docs.python.org/3/library/asyncio.html")
+        web_fetch("github.com/user/repo/blob/main/README.md")
+        web_fetch("example.com/article", timeout=15)
+
+    LIMITATIONS:
+    - JavaScript-rendered content may not be captured
+    - Images, videos not extracted (text only)
+    - Very long pages truncated at 5000 characters
+    - Some sites may block automated requests
+
+    AVOID:
+    - Fetching the same URL multiple times
+    - Non-text content (PDFs, images, videos)
+    - Sites requiring authentication
     """
     try:
         # Add scheme if missing
@@ -126,15 +169,51 @@ def web_fetch(url: str, timeout: int = 10) -> str:
 def shell_exec(command: str) -> str:
     """Execute Unix shell commands for file operations, git, system info, and text processing.
 
-    Use for: listing files, viewing contents, searching, git operations, running programs.
+    WHEN TO USE:
+    - Getting current date/time (date command)
+    - Listing files and directories (ls, find)
+    - Viewing file contents (cat, head, tail)
+    - Git operations (git status, git log, git diff)
+    - System information (whoami, pwd, uname)
+    - Text processing (grep, wc, sort)
+
+    BEST PRACTICES:
+    - For date/time: use `date` command with specific format
+    - Use absolute paths when possible
+    - Combine commands with && for sequential execution
+    - Use quotes for arguments with spaces
 
     Args:
-        command: Shell command to execute
+        command: Shell command to execute (e.g., "ls -la /tmp")
 
     Returns:
-        Command output
+        Command output (stdout and stderr combined)
 
-    Note: Commands timeout after 30s. Avoid destructive operations (rm -rf, dd, sudo).
+    Examples:
+        shell_exec("date '+%Y-%m-%d %H:%M:%S'")     # Current date and time
+        shell_exec("ls -la ~/Documents")             # List files with details
+        shell_exec("git log --oneline -5")          # Last 5 commits
+        shell_exec("cat README.md | head -20")      # First 20 lines of file
+        shell_exec("find . -name '*.py' -type f")   # Find Python files
+
+    SAFETY LIMITS:
+    - Commands timeout after 30 seconds
+    - Runs in current working directory
+    - Has access to file system (use with caution)
+
+    STRICTLY AVOID:
+    - Destructive operations: rm -rf, dd, mkfs
+    - System modifications: sudo, chmod 777, chown
+    - Interactive commands: vim, nano, top
+    - Network attacks: nmap, nc, curl loops
+    - Resource exhaustion: fork bombs, infinite loops
+    - Package installation: apt, yum, pip install
+
+    SAFE COMMANDS:
+    ✅ date, ls, pwd, whoami, cat, head, tail, grep, find, wc
+    ✅ git status, git log, git diff, git branch
+    ✅ echo, printf, basename, dirname
+    ❌ rm, sudo, chmod, chown, kill, pkill, dd, mkfs
     """
     try:
         result = subprocess.run(

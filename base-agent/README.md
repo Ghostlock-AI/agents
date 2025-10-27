@@ -53,13 +53,39 @@ python3 src/main.py
 - **Web Fetch**: Extract content from URLs
 - **Shell Execution**: Run system commands (sandboxed)
 
-### Reasoning Strategies 🧠
-Switch between multiple reasoning strategies at runtime:
+### Reasoning: Workflows vs Agents 🧠
 
-- **ReAct** (Default): Iterative reasoning with tool use. Best for general tasks and exploration.
-- **ReWOO**: Plans all steps upfront, executes in parallel. Best for research and data gathering.
-- **Plan-and-Execute**: Creates adaptive plans with replanning. Best for complex multi-step tasks.
-- **LATS**: Tree search with self-reflection. Best for complex problems requiring exploration (slower, higher quality).
+Following [Anthropic's best practices](https://www.anthropic.com/engineering/building-effective-agents), we distinguish between two fundamental patterns:
+
+**🔄 WORKFLOWS** - Predefined code paths with LLM orchestration:
+- **Prompt Chain**: Sequential LLM calls with validation gates
+- **Routing**: Classifies inputs and routes to specialized handlers
+- **ReWOO**: Plans all steps upfront, executes in parallel
+- **Plan-Execute**: Adaptive planning with replanning capability
+
+**🤖 AGENTS** - LLMs dynamically control their own processes:
+- **ReAct** (Default): Iterative reasoning with tool use
+- **LATS**: Tree search with self-reflection (advanced)
+
+#### When to Use Which?
+
+```
+Is the task open-ended with unpredictable steps?
+├─ YES → Use an AGENT (ReAct or LATS)
+└─ NO  → Use a WORKFLOW
+         ├─ Need quality gates? → Prompt Chain
+         ├─ Multiple input types? → Routing
+         ├─ Parallel execution? → ReWOO
+         └─ Adaptive planning? → Plan-Execute
+```
+
+**Quick Guide:**
+- 📝 Content generation → **Prompt Chain**
+- 🎯 Customer service → **Routing**
+- 🔬 Research tasks → **ReWOO**
+- 🏗️ Complex projects → **Plan-Execute**
+- 🔄 General queries → **ReAct** (default)
+- 🌳 Hard problems → **LATS**
 
 ### Interactive TUI
 - Multiline input with syntax highlighting
