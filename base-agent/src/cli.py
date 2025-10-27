@@ -39,6 +39,8 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.application.current import get_app
 
+from reasoning.pattern_selector import PatternSelector, create_confirmation_prompt
+
 console = Console()
 
 
@@ -240,6 +242,67 @@ def display_banner(agent) -> None:
     panel = Panel(content, border_style="dim", width=width)
     console.print()
     console.print(panel)
+
+
+def ask_pattern_confirmation(agent, prompt: str, session: PromptSession) -> bool:
+    """
+    Ask user to confirm pattern selection.
+
+    Returns:
+        True if should proceed with query, False to skip
+    """
+    # Get pattern recommendation
+    selector = PatternSelector(agent.llm)
+
+    with console.status("[dim]Analyzing query...[/dim]", spinner="dots"):
+        recommendation = selector.select_pattern(prompt)
+
+    # Display recommendation
+    console.print()
+    explanation = selector.explain_recommendation(recommendation)
+    console.print(explanation)
+    console.print()
+
+    # Ask for confirmation
+    current_strategy = agent.get_current_strategy_name()
+    recommended_strategy = recommendation.pattern_name
+
+    if current_strategy == recommended_strategy:
+        console.print(f"[dim]Already using {recommended_strategy} strategy, proceeding...[/dim]")
+        console.print()
+        return True
+
+    console.print("[bold]Options:[/bold]")
+    console.print(f"  [green]y[/green] - Switch to {recommended_strategy} and proceed")
+    console.print(f"  [yellow]n[/yellow] - Keep {current_strategy} and proceed")
+    console.print(f"  [red]c[/red] - Cancel this query")
+    console.print()
+
+    try:
+        with patch_stdout():
+            response = session.prompt("▌ ", style=Style.from_dict({"prompt": "fg:#888888"}))
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    response = response.strip().lower()
+
+    if response in ("y", "yes"):
+        # Switch to recommended strategy
+        try:
+            agent.switch_reasoning_strategy(recommended_strategy)
+            console.print(f"[green]✓[/green] Switched to [bold]{recommended_strategy}[/bold]\n")
+            return True
+        except Exception as e:
+            console.print(f"[red]Error switching strategy:[/red] {e}")
+            return False
+    elif response in ("n", "no"):
+        # Keep current strategy
+        console.print(f"[dim]Keeping {current_strategy} strategy[/dim]\n")
+        return True
+    else:
+        # Cancel
+        console.print("[dim]Query cancelled[/dim]\n")
+        return False
 
 
 def stream_response(agent, prompt: str, session_id: str) -> None:
@@ -490,9 +553,15 @@ def run_interactive(agent, session_id: str = "main_session") -> None:
 
                 clean, attachments = _parse_file_commands(text)
                 message = _build_message(clean, attachments)
-                stream_response(agent, message, session_id)
 
-                console.print("[dim]" + "-" * min(width, 120) + "[/dim]")
+                # Ask for pattern confirmation before processing
+                should_proceed = ask_pattern_confirmation(agent, message, session)
+
+                if should_proceed:
+                    stream_response(agent, message, session_id)
+                    console.print("[dim]" + "-" * min(width, 120) + "[/dim]")
+                else:
+                    console.print("[dim]" + "-" * min(width, 120) + "[/dim]")
 
     except KeyboardInterrupt:
         pass

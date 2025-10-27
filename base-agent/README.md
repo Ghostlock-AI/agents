@@ -87,6 +87,12 @@ Is the task open-ended with unpredictable steps?
 - 🔄 General queries → **ReAct** (default)
 - 🌳 Hard problems → **LATS**
 
+### Intelligent Pattern Selection
+- **Automatic**: AI analyzes your query and recommends the best reasoning pattern
+- **User Confirmation**: You review and approve (or override) the recommendation
+- **Based on Anthropic's Framework**: Uses task characteristics to select optimal approach
+- **Transparent**: Shows confidence score and reasoning for each recommendation
+
 ### Interactive TUI
 - Multiline input with syntax highlighting
 - File attachment support (`/file <path>`)
@@ -100,6 +106,30 @@ Is the task open-ended with unpredictable steps?
 
 ```bash
 python src/main.py
+```
+
+**How it works:**
+1. Type your query
+2. The AI analyzes your query and recommends a reasoning pattern
+3. You see the recommendation with confidence score and explanation
+4. Choose:
+   - `y` - Switch to recommended pattern and proceed
+   - `n` - Keep current pattern and proceed
+   - `c` - Cancel the query
+
+Example:
+```
+▌ Help me debug my Python script that's crashing
+
+🤖 Recommended: react (AGENT)
+Confidence: 90%
+
+Why: The task is exploratory and requires investigation...
+
+Options:
+  y - Switch to react and proceed
+  n - Keep current and proceed
+  c - Cancel this query
 ```
 
 The TUI supports these commands:
