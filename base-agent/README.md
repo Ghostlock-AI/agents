@@ -56,10 +56,16 @@ python3 src/main.py
 ### Reasoning Strategies 🧠
 Switch between multiple reasoning strategies at runtime:
 
-- **ReAct** (Default): Iterative reasoning with tool use. Best for general tasks and exploration.
+- **ReAct** (Default): Iterative reasoning with tool use. Always uses tools for time-sensitive information (dates, weather, news). Best for general tasks and exploration.
 - **ReWOO**: Plans all steps upfront, executes in parallel. Best for research and data gathering.
 - **Plan-and-Execute**: Creates adaptive plans with replanning. Best for complex multi-step tasks.
 - **LATS**: Tree search with self-reflection. Best for complex problems requiring exploration (slower, higher quality).
+
+**Key Improvements:**
+- Agent never hallucinates current information from training data
+- Always uses tools for: dates/times, weather, news, sports, market data
+- Provides well-formatted, comprehensive but concise answers
+- Smart judgment: uses existing knowledge for stable technical concepts
 
 ### Interactive TUI
 - Multiline input with syntax highlighting
