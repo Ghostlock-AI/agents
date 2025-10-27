@@ -121,11 +121,14 @@ Rules:
             if not query:
                 query = str(messages[-1].content)
 
+            # Use a fresh LLM without tools for planning to avoid tool_calls
+            llm_for_planning = llm_with_tools.bind(tools=[])
+
             prompt = planning_prompt.format_messages(
                 tool_guide=build_tool_guide(tools),
                 query=query,
             )
-            response = llm_with_tools.invoke(prompt)
+            response = llm_for_planning.invoke(prompt)
             text = response.content if isinstance(response.content, str) else str(response.content)
             plan_json = _parse_json(text)
             if not plan_json or not isinstance(plan_json, dict) or "steps" not in plan_json:
@@ -162,7 +165,10 @@ Rules:
                     tool_calls.append({"name": tool_name, "args": args, "id": f"s{sid}"})
 
             if not tool_calls:
+                # No more steps to execute, return empty
                 return {"messages": []}
+
+            # Return AIMessage with tool_calls
             return {"messages": [AIMessage(content="", tool_calls=tool_calls)]}
 
         def collect_results_node(state):
@@ -192,14 +198,30 @@ Rules:
             """Synthesize final answer from collected execution results."""
             messages = state["messages"]
             results: List[Dict[str, Any]] = list(state.get("results") or [])
+
+            # Filter messages to only include HumanMessage, SystemMessage, and AIMessage without tool_calls
+            # This prevents OpenAI API errors about unresolved tool_calls
+            clean_messages = []
+            for msg in messages:
+                if isinstance(msg, (HumanMessage, SystemMessage)):
+                    clean_messages.append(msg)
+                elif isinstance(msg, AIMessage):
+                    # Only include AIMessage if it doesn't have unresolved tool_calls
+                    if not (hasattr(msg, "tool_calls") and msg.tool_calls):
+                        clean_messages.append(msg)
+
             lines = []
             for r in results:
                 lines.append(f"- [{r.get('tool')}] step {r.get('step_id')}: {r.get('content')}")
+
             synthesis_prompt = (
                 "Based on the following tool execution results, provide a concise, complete answer to the original query.\n\n"
                 + "\n".join(lines)
             )
-            response = llm_with_tools.invoke(messages + [SystemMessage(content=synthesis_prompt)])
+
+            # Use LLM without tools for synthesis
+            llm_for_synthesis = llm_with_tools.bind(tools=[])
+            response = llm_for_synthesis.invoke(clean_messages + [SystemMessage(content=synthesis_prompt)])
             return {"messages": [response]}
 
         def planner_route(state) -> Literal["plan_to_calls", "synthesizer"]:
@@ -208,15 +230,12 @@ Rules:
             return "plan_to_calls" if steps else "synthesizer"
 
         def after_plan_route(state) -> Literal["tools", "synthesizer"]:
-            plan = state.get("plan") or {}
-            steps: List[Dict[str, Any]] = plan.get("steps", [])
-            executed: Set[str] = set(state.get("executed") or [])
-            for s in steps:
-                sid = str(s.get("id"))
-                if sid in executed:
-                    continue
-                deps = s.get("depends_on", []) or []
-                if all(str(d) in executed for d in deps):
+            """Route after plan_to_calls: if we created tool_calls, go to tools; else synthesize."""
+            messages = state.get("messages", [])
+            # Check if the last message has tool_calls
+            if messages:
+                last_msg = messages[-1]
+                if isinstance(last_msg, AIMessage) and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                     return "tools"
             return "synthesizer"
 
