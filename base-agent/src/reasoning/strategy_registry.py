@@ -8,7 +8,12 @@ Provides a centralized place to register and retrieve strategies.
 from typing import Dict, List, Optional
 from .base import ReasoningStrategy
 from .agents import ReActStrategy, LATSStrategy
-from .workflows import ReWOOStrategy, PlanExecuteStrategy
+from .workflows import (
+    PromptChainWorkflow,
+    RoutingWorkflow,
+    ReWOOStrategy,
+    PlanExecuteStrategy,
+)
 
 
 class StrategyRegistry:
@@ -24,14 +29,22 @@ class StrategyRegistry:
 
     def _register_defaults(self):
         """Register the default built-in strategies."""
-        default_strategies = [
+        # Agents: Dynamic LLM control
+        agents = [
             ReActStrategy(),
-            ReWOOStrategy(),
-            PlanExecuteStrategy(),
             LATSStrategy(),
         ]
 
-        for strategy in default_strategies:
+        # Workflows: Predefined code paths
+        workflows = [
+            PromptChainWorkflow(),  # Generate → Validate → Refine
+            RoutingWorkflow(),      # Classify → Route to handler
+            ReWOOStrategy(),        # Plan → Execute → Synthesize
+            PlanExecuteStrategy(),  # Plan → Execute → Replan if needed
+        ]
+
+        # Register all strategies
+        for strategy in agents + workflows:
             self.register(strategy)
 
     def register(self, strategy: ReasoningStrategy) -> None:

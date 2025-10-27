@@ -46,7 +46,7 @@ class RoutingWorkflow(ReasoningStrategy):
 
     def __init__(
         self,
-        categories: Dict[str, str],
+        categories: Optional[Dict[str, str]] = None,
         handlers: Optional[Dict[str, Callable]] = None,
         default_category: str = "general",
     ):
@@ -58,13 +58,23 @@ class RoutingWorkflow(ReasoningStrategy):
                        e.g., {"technical": "Technical support questions",
                               "billing": "Billing and payment issues",
                               "general": "General inquiries"}
+                       If None, uses default general-purpose categories
             handlers: Optional dict mapping categories to handler functions
                      If not provided, uses default LLM handler for all
             default_category: Fallback category for unclear inputs
         """
-        self.categories = categories
+        self.categories = categories or self._default_categories()
         self.handlers = handlers or {}
         self.default_category = default_category
+
+    def _default_categories(self) -> Dict[str, str]:
+        """Default general-purpose categories."""
+        return {
+            "coding": "Programming, software development, debugging questions",
+            "research": "Information lookup, research, fact-finding queries",
+            "creative": "Writing, brainstorming, creative content generation",
+            "general": "General questions and conversations",
+        }
 
     def get_name(self) -> str:
         return "routing"
