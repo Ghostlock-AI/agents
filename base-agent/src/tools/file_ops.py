@@ -8,7 +8,7 @@ than generic shell commands.
 from langchain_core.tools import tool
 from pathlib import Path
 from typing import Optional
-from tool_logger import log_tool_start, log_tool_complete, log_tool_error
+from tool_logger import log_tool_start, log_tool_complete, log_tool_error, log_diff
 
 
 @tool
@@ -80,17 +80,37 @@ def write_file(file_path: str, content: str) -> str:
 
     Example:
         write_file("hello.c", '#include <stdio.h>\\n...')
+
+    Note:
+    - If file exists, it will be completely overwritten
+    - Shows diff if overwriting existing file
+    - For small changes to existing files, use edit_file instead
     """
     log_tool_start("Write", args_str=file_path)
 
     try:
         path = Path(file_path).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check if file exists and show diff
+        existing_content = None
+        if path.exists():
+            existing_content = path.read_text()
+
         path.write_text(content)
 
         lines = content.count('\n') + 1
-        log_tool_complete(f"Wrote {lines} lines to {file_path}")
-        return f"Successfully wrote {len(content)} bytes ({lines} lines) to {file_path}"
+
+        # Show diff if overwriting, or content preview if new file
+        if existing_content is not None:
+            log_diff(existing_content, content, file_path, context_lines=3)
+            log_tool_complete(f"Overwrote {file_path} ({lines} lines)")
+            return f"Successfully overwrote {file_path} with {len(content)} bytes ({lines} lines)"
+        else:
+            # For new files, show the content with a "created" diff
+            log_diff("", content, file_path, context_lines=0)
+            log_tool_complete(f"Created {file_path} ({lines} lines)")
+            return f"Successfully wrote {len(content)} bytes ({lines} lines) to {file_path}"
     except Exception as e:
         log_tool_error(str(e))
         return f"ERROR writing {file_path}: {e}"
@@ -98,7 +118,7 @@ def write_file(file_path: str, content: str) -> str:
 
 @tool
 def edit_file(file_path: str, old_string: str, new_string: str) -> str:
-    """Edit file using exact string replacement.
+    """Edit file using exact string replacement with visual diff output.
 
     Args:
         file_path: Path to file
@@ -108,13 +128,24 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
     Returns:
         Success message or error if old_string not found
 
-    Example:
-        edit_file("hello.c", 'printf("Hello', 'printf("Hello, World!\\n"')
+    Examples:
+        # Small, focused edit (preferred)
+        edit_file("hello.c", 'printf("Hello")', 'printf("Hello, World!")')
+
+        # Multi-line edit
+        edit_file("config.py", 'DEBUG = False', 'DEBUG = True\\nLOG_LEVEL = "INFO"')
+
+    Best Practices:
+    - Make SMALL, LOGICAL edits (one conceptual change per call)
+    - Edit one function, one section, or one logical block at a time
+    - Multiple small edits are better than one large edit
+    - This makes diffs easier to review and understand
 
     Why this is better than line-based editing:
     - More precise (exact match required)
     - No off-by-one line number errors
     - Works across multiple lines
+    - Shows visual diff of changes
     - Clear error if match fails
     """
     log_tool_start("Edit", args_str=file_path)
@@ -141,11 +172,14 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         new_content = content.replace(old_string, new_string, 1)
         path.write_text(new_content)
 
+        # Show visual diff of the changes
+        log_diff(content, new_content, file_path, context_lines=3)
+
         if count > 1:
-            log_tool_complete(f"Replaced 1 of {count} occurrences in {file_path}")
+            log_tool_complete(f"Replaced 1 of {count} occurrences")
             return f"SUCCESS: Replaced 1 of {count} occurrences in {file_path}. (Use multiple edit_file calls for other occurrences)"
         else:
-            log_tool_complete(f"Replaced in {file_path}")
+            log_tool_complete(f"Edit complete")
             return f"SUCCESS: Replaced in {file_path}"
 
     except Exception as e:

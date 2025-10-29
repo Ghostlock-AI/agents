@@ -155,11 +155,7 @@ class Agent:
 
                 # Check for tool calls in AI messages
                 if isinstance(last_message, AIMessage):
-                    # If the AI is calling tools, notify the user
-                    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                        for tool_call in last_message.tool_calls:
-                            tool_name = tool_call.get("name", "unknown")
-                            yield f"[TOOL: {tool_name}]\n"
+                    # Tool calls are already logged by tool_logger, no need to show [TOOL: xxx]
 
                     # Show strategy-specific markers for LATS and Plan-Execute
                     if last_message.content:

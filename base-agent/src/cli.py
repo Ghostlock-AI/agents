@@ -97,10 +97,10 @@ class CommandDispatcher:
     def _handle_help(self, text: str, args: List[str]) -> CommandResult:
         """Handle /help command."""
         console.print()
-        console.print("[dim]/file PATH[/dim] — attach a local file")
-        console.print("[dim]/reasoning[/dim] — list or switch strategy")
-        console.print("[dim]/help[/dim] — show available commands")
-        console.print("[dim]/quit[/dim] — exit application")
+        console.print("[#888888]/file PATH[/#888888] — attach a local file")
+        console.print("[#888888]/reasoning[/#888888] — list or switch strategy")
+        console.print("[#888888]/help[/#888888] — show available commands")
+        console.print("[#888888]/quit[/#888888] — exit application")
         console.print()
         return CommandResult(handled=True, should_exit=False)
 
@@ -229,7 +229,7 @@ def display_banner(agent) -> None:
 
 
 def stream_response(agent, prompt: str, session_id: str) -> None:
-    """Stream response from agent with markdown rendering."""
+    """Stream response from agent (plain text output)."""
     accumulated = ""
     strategy = agent.get_current_strategy_name()
     status = f"[blue][{strategy.upper()}] Thinking...[/blue]"
@@ -251,7 +251,8 @@ def stream_response(agent, prompt: str, session_id: str) -> None:
             return
 
     if accumulated.strip():
-        console.print(Markdown(accumulated))
+        # Print as plain text instead of markdown
+        console.print(accumulated)
     console.print()
 
 
