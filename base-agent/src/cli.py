@@ -10,6 +10,7 @@ Supports:
 
 Commands:
     /file PATH                attach a local file to this message
+    /tools                    list available agent tools
     /reasoning list           list all available reasoning strategies
     /reasoning current        show current reasoning strategy
     /reasoning switch NAME    switch to a different reasoning strategy
@@ -64,6 +65,7 @@ class CommandDispatcher:
             "help": self._handle_help,
             "quit": self._handle_quit,
             "exit": self._handle_quit,
+            "tools": self._handle_tools,
             "reasoning": self._handle_reasoning,
         }
 
@@ -98,6 +100,7 @@ class CommandDispatcher:
         """Handle /help command."""
         console.print()
         console.print("[#888888]/file PATH[/#888888] — attach a local file")
+        console.print("[#888888]/tools[/#888888] — list available tools")
         console.print("[#888888]/reasoning[/#888888] — list or switch strategy")
         console.print("[#888888]/help[/#888888] — show available commands")
         console.print("[#888888]/quit[/#888888] — exit application")
@@ -107,6 +110,30 @@ class CommandDispatcher:
     def _handle_quit(self, text: str, args: List[str]) -> CommandResult:
         """Handle /quit and /exit commands."""
         return CommandResult(handled=True, should_exit=True)
+
+    def _handle_tools(self, text: str, args: List[str]) -> CommandResult:
+        """Handle /tools command to list agent tools."""
+        tools = getattr(self.agent, "tools", []) or []
+
+        if not tools:
+            console.print("[yellow]No tools are currently configured.[/yellow]")
+            return CommandResult(handled=True, should_exit=False)
+
+        console.print("\n[bold cyan]Available Tools:[/bold cyan]\n")
+        for tool in tools:
+            name = getattr(tool, "name", None) or getattr(tool, "__name__", "unknown")
+            description = getattr(tool, "description", "") or "No description provided."
+
+            summary = description.strip()
+            if summary:
+                # Show only the first paragraph to keep output concise
+                summary = summary.split("\n\n", 1)[0].strip()
+            else:
+                summary = "No description provided."
+
+            console.print(f"[bold]{name}[/bold]\n  {summary}\n")
+
+        return CommandResult(handled=True, should_exit=False)
 
     def _handle_reasoning(self, text: str, args: List[str]) -> CommandResult:
         """Handle /reasoning commands."""
@@ -184,6 +211,7 @@ class CommandDispatcher:
         """Get command completions for prompt_toolkit."""
         return {
             "/file": PathCompleter(expanduser=True, only_directories=False),
+            "/tools": None,
             "/help": None,
             "/reasoning": {
                 "list": None,
